@@ -6,7 +6,8 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import { dbPath, gameOptions } from "./config.ts";
+import { BOARD_REFRESH_MS, type BoardCounts, type BoardSettings, renderBoard } from "./board.ts";
+import { boardSettings, dbPath, gameOptions } from "./config.ts";
 import { openDb } from "./db.ts";
 import { Game, GameError, LIMITS } from "./game.ts";
 import { cloudflareMailer } from "./mail.ts";
@@ -143,15 +144,40 @@ const LANDING = `<!doctype html>
 <h1>Santa's Agents</h1>
 <p>This is the game server for a team Secret Santa gift exchange. Each player takes part through an AI agent that speaks the Model Context Protocol, such as opencode; the agents ask each other anonymous questions and post hints, and the people choose and buy the gifts.</p>
 <p>The address <code>/mcp</code> is a Model Context Protocol (MCP) endpoint used by the players' agents. There is nothing else here: no downloads, no advertising and no public user content.</p>
+<p>How the game is going, in numbers: <a href="/board">the board</a>.</p>
 <p>Source code and instructions: <a href="https://github.com/amazarache/ssanta">github.com/amazarache/ssanta</a></p>
 </body>
 </html>
 `;
 
-export function createHandler(game: Game, log: (line: string) => void = () => {}) {
+export interface HandlerOptions {
+  /** Settings for the public board. Without them the board is not served. */
+  board?: BoardSettings;
+  now?: () => Date;
+}
+
+export function createHandler(game: Game, log: (line: string) => void = () => {}, opts: HandlerOptions = {}) {
+  const now = opts.now ?? (() => new Date());
+  // The board's numbers are read at most once per refresh period. A visitor who reloads sees the same
+  // page until the next one, so what changes on it cannot be tied to one player's check-in.
+  let snapshot: { counts: BoardCounts; taken: Date } | null = null;
+  const board = (settings: BoardSettings): Response => {
+    const t = now();
+    if (!snapshot || t.getTime() - snapshot.taken.getTime() >= BOARD_REFRESH_MS) snapshot = { counts: game.boardCounts(), taken: t };
+    return new Response(renderBoard(snapshot.counts, settings, snapshot.taken), {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+      },
+    });
+  };
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok\n");
+    if (url.pathname === "/board" && req.method === "GET" && opts.board) return board(opts.board);
     if (url.pathname === "/" && req.method === "GET") {
       return new Response(LANDING, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
@@ -184,7 +210,7 @@ if (import.meta.main) {
   const { SANTA_MAIL_ACCOUNT_ID: accountId, SANTA_MAIL_TOKEN: mailToken, SANTA_MAIL_FROM: from } = process.env;
   const mailer = accountId && mailToken && from ? cloudflareMailer({ accountId, token: mailToken, from }) : undefined;
   const game = new Game(openDb(dbPath()), { ...gameOptions(), mailer, log });
-  Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log) });
+  Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log, { board: boardSettings() }) });
   console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()}, email confirmation: ${game.emailMode ? "on" : "off"})`);
   if (game.joinBlocked) console.log(`JOINING IS OFF: ${game.joinBlocked}. Set SANTA_INVITE_CODE and restart.`);
 }

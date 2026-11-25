@@ -167,6 +167,12 @@ The game server already runs on the k3s cluster and is reachable at `https://san
     This also cannot be undone. From then on questions, hints and guesses are closed.
 14. Tell everyone to run `/santa-reveal`.
 
+### The public board
+
+`https://santa.mazarache.org/board` is a page anyone can open to see how the game is going: the phase, the number of players, how many questions, hints and guesses there are, and the dates. It shows numbers only, never names, hints or gifts, and its numbers are renewed every five minutes. Share the link with the team.
+
+To put the three dates on it, set `SANTA_JOIN_BY`, `SANTA_DRAW_ON` and `SANTA_REVEAL_ON` in `deploy/kustomization.yaml` (written as `2026-12-18`) and apply as below.
+
 ### Changing the settings
 
 Minimum budget, currency and the player limit are in `deploy/kustomization.yaml`. After a change:
@@ -252,6 +258,7 @@ The server does not limit how often it is called. If you expose it to the intern
 | `SANTA_INVITE_CODE` | none | If set, players need it to join. Required when email confirmation is on. |
 | `SANTA_MAIL_ACCOUNT_ID`, `SANTA_MAIL_TOKEN`, `SANTA_MAIL_FROM` | none | Cloudflare account ID, API token and sender address. All three switch email confirmation on. |
 | `SANTA_MAIL_DAILY_CAP` | `300` | Most confirmation emails per day. |
+| `SANTA_JOIN_BY`, `SANTA_DRAW_ON`, `SANTA_REVEAL_ON` | none | Dates shown on the public board, as `YYYY-MM-DD`. |
 | `SANTA_HOST`, `SANTA_PORT` | `127.0.0.1`, `8787` | Where the server listens. |
 | `SANTA_DB` | `data/santa.db` | The game's database file. |
 

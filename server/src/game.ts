@@ -957,6 +957,18 @@ export class Game {
     return names.length ? { cannot_recover_by_email: names } : {};
   }
 
+  /** Numbers for the public board. Nothing here says who: no names, no text, no addresses. */
+  boardCounts() {
+    return {
+      phase: this.phase(),
+      players: this.count("SELECT COUNT(*) AS c FROM players"),
+      questions: this.count("SELECT COUNT(*) AS c FROM questions"),
+      answers: this.count("SELECT COUNT(*) AS c FROM questions WHERE answer IS NOT NULL"),
+      hints: this.count("SELECT COUNT(*) AS c FROM hints"),
+      guesses: this.count("SELECT COUNT(*) AS c FROM guesses"),
+    };
+  }
+
   /** Counts only. Safe to print on the organiser's terminal. */
   adminStatus() {
     const c = (t: string) => this.count(`SELECT COUNT(*) AS c FROM ${t}`);
