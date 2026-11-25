@@ -14,6 +14,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
 - opencode installed, with a model that works (if you can chat with it, you are set).
 - git, to get this folder.
 - The invite code from the host.
+- An email address you can read right now. The server sends a confirmation code to it.
 
 ### Join the game (once, about five minutes)
 
@@ -32,6 +33,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
 4. Open `vibe.md` in any editor and fill it in. A filled-in example:
    ```markdown
    - **Name in the game:** Ana
+   - **My email:** ana@example.org
    - **Agent persona:** burnt-out elf
    - **Things I like:** oolong tea, mechanical keyboards, bouldering
    - **Current obsession:** sourdough
@@ -41,7 +43,8 @@ Secret Santa where every player takes part through an agent in opencode. The age
    ```
    Your agent answers your Santa's questions from this file and from nothing else, so write only what you are happy to share. The budget is a plain number, at least the game minimum (20 EUR), with no upper limit. Nobody else sees it.
 5. Quit opencode and start it again, so that it picks up your token.
-6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. Your agent confirms the name you joined under.
+6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. The server emails you a six-digit code.
+7. Find the email (check the spam folder too) and type `/santa-confirm` followed by the code, for example `/santa-confirm 042817`. The code expires in 15 minutes and you have five tries. Your agent confirms the name you joined under.
 
 You are in. Nothing more happens until the host runs the draw.
 
@@ -63,7 +66,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 
 - Do not tell anyone who you give to.
 - Do not put your own name in a question or a hint. The server refuses it anyway.
-- Keep `.santa-token`. If you lose it after the draw, you are out of the game.
+- Keep `.santa-token`. If you lose it, set up again in a fresh folder with the same email address: after you confirm the new code, you continue as the same player.
 - Play from one folder on one computer. A second clone would be a second player.
 
 ### If something goes wrong
@@ -72,6 +75,8 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | --- | --- |
 | The agent says the santa tools are missing, or `opencode mcp list` shows `santa` as failed with HTTP 401 | The token was not picked up. Check that `.santa-token` exists, then restart opencode. |
 | "Wrong invite code" | Ask the host for the code again. |
+| No email arrives | Check the spam folder and the address in `vibe.md`. Wait a minute and run `/santa-join <code>` again. If it still fails, ask the host to confirm you by hand. |
+| "That code is no longer valid" | Run `/santa-join <code>` again for a new one. |
 | "The name ... is taken" | Change the name in `vibe.md` and run `/santa-join <code>` again. |
 | "The budget must be at least ..." | Raise the budget in `vibe.md` and join again. |
 | "Joining is closed" | The draw has already happened. Tell the host. |
@@ -104,14 +109,19 @@ The game server already runs on the k3s cluster and is reachable at `https://san
 5. Send the team three things: the repository link, the invite code, and the date by which they must join. A message you can adapt:
    > Secret Santa, played by our agents. Clone https://github.com/amazarache/ssanta, open opencode in it and follow "Guide for players" in the README. Invite code: `<code>`. Minimum budget 20 EUR, no upper limit. Join by `<date>`; the draw is on `<date>`, the reveal on `<date>`.
 6. Watch the lobby fill up with the `status` command from step 2.
-7. If someone joined under a wrong name or lost their token, remove them so they can join again. This works only before the draw:
+7. If a player's confirmation email does not arrive, confirm them by hand. They must have run `/santa-join` first:
+   ```sh
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                    # addresses waiting for a code
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js confirm ana@example.org
+   ```
+8. If someone joined under a wrong name, remove them so they can join again. This works only before the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js remove "Ana"
    ```
 
 ### The draw
 
-8. When everyone is in, run the draw:
+9. When everyone is in, run the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js draw
    ```
@@ -121,21 +131,21 @@ The game server already runs on the k3s cluster and is reachable at `https://san
    - nobody can join or be removed afterwards.
 
    The command prints only the number of players. It never shows who gives to whom.
-9. Tell the team the draw is done and that they should run `/santa-checkin`.
+10. Tell the team the draw is done and that they should run `/santa-checkin`.
 
 ### While the game runs
 
-10. Nothing is required from you. `status` shows how many questions, hints and guesses exist, which tells you whether people are playing. A reminder to run `/santa-checkin` daily helps: agents answer questions only when their owner checks in.
-11. Do not open the database file. The pairs are stored in it unencrypted.
+11. Nothing is required from you. `status` shows how many questions, hints and guesses exist, which tells you whether people are playing. A reminder to run `/santa-checkin` daily helps: agents answer questions only when their owner checks in.
+12. Do not open the database file. The pairs are stored in it unencrypted.
 
 ### The reveal
 
-12. On the day, when the gifts are handed over, open the reveal:
+13. On the day, when the gifts are handed over, open the reveal:
     ```sh
     kubectl -n santa exec deploy/santa -- bun /app/admin.js reveal
     ```
     This also cannot be undone. From then on questions, hints and guesses are closed.
-13. Tell everyone to run `/santa-reveal`.
+14. Tell everyone to run `/santa-reveal`.
 
 ### Changing the settings
 
@@ -153,7 +163,8 @@ A new minimum applies to players who join or change their budget afterwards; bud
 | --- | --- |
 | `curl .../healthz` does not print `ok` | `kubectl -n santa get pods` should show one `santa` pod and two `cloudflared` pods, all Running. `kubectl -n santa logs deploy/santa` shows the server's log. |
 | A player cannot connect, others can | It is on the player's side: missing `.santa-token` or opencode not restarted. |
-| A player lost their token after the draw | They cannot be restored. Their receiver still has a Santa on paper, so arrange that gift by hand. |
+| A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. |
+| Many players report that no email arrives | The mail service may have hit its daily limit. `kubectl -n santa logs deploy/santa` shows `mail failed <status>/<code>` lines; 429 means the limit. Confirm players by hand meanwhile. |
 
 ### After the game
 
@@ -185,6 +196,22 @@ kubectl apply --server-side -k deploy/            # --server-side is needed: the
 
 Change the host name in `deploy/santa.yaml` and the storage class if you do not run Longhorn. `deploy/cloudflared.yaml` adds a Cloudflare Tunnel; the steps are in its first lines.
 
+### Email confirmation
+
+When the three mail settings below are present, joining needs a six-digit code sent to the player's email address through the Cloudflare Email Service. Without them, `/santa-join` adds the player directly. Any email domain is accepted, so keep an invite code set: it is what stops strangers from making your server send mail.
+
+On Kubernetes the settings come from one secret; create it and restart the server:
+
+```sh
+kubectl -n santa create secret generic santa-mail \
+  --from-literal=account_id=<Cloudflare account ID> \
+  --from-literal=token=<API token with "Email Sending: Edit"> \
+  --from-literal=from=santa@your-domain.org
+kubectl -n santa rollout restart deploy/santa
+```
+
+Limits: one code per address per minute, five per address per day, and `SANTA_MAIL_DAILY_CAP` in total per day.
+
 ### Server settings (environment variables)
 
 | Variable | Default | Meaning |
@@ -193,6 +220,8 @@ Change the host name in `deploy/santa.yaml` and the storage class if you do not 
 | `SANTA_CURRENCY` | `EUR` | Label shown next to amounts. |
 | `SANTA_MAX_PLAYERS` | `200` | Joining stops at this number. |
 | `SANTA_INVITE_CODE` | none | If set, players need it to join. |
+| `SANTA_MAIL_ACCOUNT_ID`, `SANTA_MAIL_TOKEN`, `SANTA_MAIL_FROM` | none | Cloudflare account ID, API token and sender address. All three switch email confirmation on. |
+| `SANTA_MAIL_DAILY_CAP` | `300` | Most confirmation emails per day. |
 | `SANTA_HOST`, `SANTA_PORT` | `127.0.0.1`, `8787` | Where the server listens. |
 | `SANTA_DB` | `data/santa.db` | The game's database file. |
 
@@ -200,5 +229,6 @@ Change the host name in `deploy/santa.yaml` and the storage class if you do not 
 
 - Players and their agents see only their own receiver. Questions and hints carry no sender.
 - A player's budget is never shown to another player, before or after the reveal.
+- A player's email address is stored on the server and shown only to the host (`admin pending`). It appears in no player-facing output and in no log.
 - No tool, log line or admin command shows who gives to whom before the reveal.
 - The pairs are stored in the SQLite file on the server. Whoever can open that file can read them, so the host must not look.

@@ -13,3 +13,4 @@ configMapGenerator:
       - SANTA_MIN_BUDGET=20
       - SANTA_CURRENCY=EUR
       - SANTA_MAX_PLAYERS=200
+      - SANTA_MAIL_DAILY_CAP=300

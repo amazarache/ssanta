@@ -5,7 +5,8 @@
 // than the caller's own assignment.
 
 import type { Database } from "bun:sqlite";
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
+import { MailError, type Mailer } from "./mail.ts";
 
 export class GameError extends Error {}
 
@@ -25,7 +26,23 @@ export interface GameOptions {
   minBudget?: number;
   /** Label only, shown next to amounts. Default EUR. */
   currency?: string;
+  /** If set, joining needs a confirmation code sent to the player's email address. */
+  mailer?: Mailer;
+  /** Most confirmation emails the server sends per UTC day. Default 300. */
+  mailDailyCap?: number;
+  /** Called with a short outcome for the server log. Never receives an address or a code. */
+  log?: (line: string) => void;
 }
+
+const CODE_TTL_MS = 15 * 60 * 1000;
+const CODE_ATTEMPTS = 5;
+const MAIL_COOLDOWN_MS = 60 * 1000;
+const MAIL_PER_ADDRESS_PER_DAY = 5;
+const EMAIL_RE = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[^\s@<>"',;]+$/;
+const CODE_SENT_REPLY = {
+  confirmation_sent: true,
+  note: "If the address can join, a six-digit code is on its way. Ask the owner to run /santa-confirm <code>. The code expires in 15 minutes.",
+};
 
 export const LIMITS = {
   minPlayers: 4,
@@ -68,6 +85,9 @@ export class Game {
   private maxPlayers: number;
   private minBudget: number;
   private currency: string;
+  private mailer?: Mailer;
+  private mailDailyCap: number;
+  private log: (line: string) => void;
 
   constructor(
     private db: Database,
@@ -81,6 +101,9 @@ export class Game {
     this.maxPlayers = opts.maxPlayers ?? LIMITS.maxPlayers;
     this.minBudget = opts.minBudget ?? 20;
     this.currency = opts.currency ?? "EUR";
+    this.mailer = opts.mailer;
+    this.mailDailyCap = opts.mailDailyCap ?? 300;
+    this.log = opts.log ?? (() => {});
     if (!Number.isFinite(this.minBudget) || this.minBudget < 0) throw new Error("minBudget must be a number, 0 or more.");
     db.exec(`
       PRAGMA journal_mode = WAL;
@@ -117,8 +140,22 @@ export class Game {
         receiver_id INTEGER PRIMARY KEY REFERENCES players(id),
         guessed_id INTEGER NOT NULL REFERENCES players(id)
       );
+      CREATE TABLE IF NOT EXISTS registrations (
+        token_hash TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        name TEXT NOT NULL,
+        budget REAL NOT NULL,
+        code_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS mail_log (email TEXT NOT NULL, sent_at INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
+    // Databases created before email confirmation have no email column.
+    const cols = db.query("PRAGMA table_info(players)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "email")) db.exec("ALTER TABLE players ADD COLUMN email TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS players_email ON players(email) WHERE email IS NOT NULL");
   }
 
   // ---- helpers ----
@@ -179,7 +216,127 @@ export class Game {
     return { your_budget: b, currency: this.currency };
   }
 
+  get emailMode(): boolean {
+    return this.mailer !== undefined;
+  }
+
+  private codeHash(tokenHash: string, code: string): string {
+    return createHash("sha256").update(`${tokenHash}:${code}`).digest("hex");
+  }
+
+  private cleanName(name: string): string {
+    const n = clean(name, LIMITS.name, "name");
+    if (!NAME_RE.test(n)) throw new GameError("Use letters, digits, spaces, dots, dashes or underscores in the name.");
+    return n;
+  }
+
+  /**
+   * Email mode, step 1. Stores a pending registration and mails a code.
+   * The reply is the same whether or not the address already plays, so it cannot be used to find out who is in the game.
+   */
+  async requestJoin(tokenHash: string, name: string, budget: number, email: string, inviteCode?: string) {
+    if (!this.mailer) throw new GameError("This game does not use email confirmation.");
+    if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.");
+    const e = String(email ?? "").trim().toLowerCase();
+    if (e.length > 254 || !EMAIL_RE.test(e)) throw new GameError("That does not look like an email address.");
+    const n = this.cleanName(name);
+    const b = this.budget(budget);
+    const already = this.db.query("SELECT name FROM players WHERE token_hash = ?").get(tokenHash) as { name: string } | null;
+    if (already) throw new GameError(`You already joined as ${already.name}.`);
+
+    const now = this.now().getTime();
+    const dayStart = Date.parse(`${this.today()}T00:00:00Z`);
+    const count = (sql: string, ...a: (string | number)[]) => (this.db.query(sql).get(...a) as { c: number }).c;
+    if (count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at > ?", e, now - MAIL_COOLDOWN_MS) > 0) {
+      throw new GameError("A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.");
+    }
+    if (count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at >= ?", e, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
+      throw new GameError("Too many codes were sent to this address today. Try again tomorrow or ask the host to confirm you.");
+    }
+    if (count("SELECT COUNT(*) AS c FROM mail_log WHERE sent_at >= ?", dayStart) >= this.mailDailyCap) {
+      throw new GameError("The server reached its email limit for today. Try again tomorrow or ask the host to confirm you.");
+    }
+
+    const code = String(this.rand(1_000_000)).padStart(6, "0");
+    this.db
+      .query(
+        `INSERT INTO registrations (token_hash, email, name, budget, code_hash, expires_at, attempts) VALUES (?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT(token_hash) DO UPDATE SET email = excluded.email, name = excluded.name, budget = excluded.budget,
+           code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0`,
+      )
+      .run(tokenHash, e, n, b, this.codeHash(tokenHash, code), now + CODE_TTL_MS);
+
+    // New players can only join in the lobby. An address that already plays may confirm at any time, to recover a lost token.
+    const known = count("SELECT COUNT(*) AS c FROM players WHERE email = ?", e) > 0;
+    if (this.phase() !== "lobby" && !known) return CODE_SENT_REPLY;
+
+    this.db.query("INSERT INTO mail_log (email, sent_at) VALUES (?, ?)").run(e, now);
+    try {
+      await this.mailer(e, code);
+      this.log("mail ok");
+    } catch (err) {
+      this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
+      const m = err instanceof MailError ? err : new MailError(0, null);
+      this.log(m.message);
+      if (m.code === 10208) throw new GameError("The mail service only allows verified addresses right now. Tell the host.");
+      if (m.status === 429) throw new GameError("The mail service limit is reached. Try again later or ask the host to confirm you.");
+      throw new GameError("The confirmation email could not be sent. Check the address, or ask the host to confirm you.");
+    }
+    return CODE_SENT_REPLY;
+  }
+
+  /** Email mode, step 2. */
+  confirm(tokenHash: string, code: string) {
+    const c = String(code ?? "").trim();
+    if (!/^\d{6}$/.test(c)) throw new GameError("The code is six digits.");
+    const reg = this.db.query("SELECT code_hash, expires_at, attempts FROM registrations WHERE token_hash = ?").get(tokenHash) as
+      | { code_hash: string; expires_at: number; attempts: number }
+      | null;
+    const restart = "Run /santa-join again to get a new code.";
+    if (!reg) throw new GameError(`There is no code waiting for you. ${restart}`);
+    if (reg.expires_at < this.now().getTime() || reg.attempts >= CODE_ATTEMPTS) {
+      this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
+      throw new GameError(`That code is no longer valid. ${restart}`);
+    }
+    if (reg.code_hash !== this.codeHash(tokenHash, c)) {
+      this.db.query("UPDATE registrations SET attempts = attempts + 1 WHERE token_hash = ?").run(tokenHash);
+      throw new GameError(`Wrong code. ${CODE_ATTEMPTS - reg.attempts - 1} tries left.`);
+    }
+    return this.promote(tokenHash);
+  }
+
+  /** Turns a pending registration into a player, or moves an existing player to this token. */
+  private promote(tokenHash: string) {
+    return this.db.transaction(() => {
+      const reg = this.db.query("SELECT email, name, budget FROM registrations WHERE token_hash = ?").get(tokenHash) as {
+        email: string;
+        name: string;
+        budget: number;
+      };
+      const drop = () => this.db.query("DELETE FROM registrations WHERE email = ?").run(reg.email);
+      const existing = this.db.query("SELECT id, name FROM players WHERE email = ?").get(reg.email) as Player | null;
+      if (existing) {
+        this.db.query("UPDATE players SET token_hash = ? WHERE id = ?").run(tokenHash, existing.id);
+        drop();
+        return { joined_as: existing.name, note: "Welcome back. This installation now plays as you; the old one no longer does." };
+      }
+      this.requirePhaseForJoin();
+      const total = (this.db.query("SELECT COUNT(*) AS c FROM players").get() as { c: number }).c;
+      if (total >= this.maxPlayers) throw new GameError("The game is full.");
+      try {
+        this.db
+          .query("INSERT INTO players (name, name_key, token_hash, budget, email) VALUES (?, ?, ?, ?, ?)")
+          .run(reg.name, reg.name.toLowerCase(), tokenHash, reg.budget, reg.email);
+      } catch {
+        throw new GameError(`The name ${reg.name} is taken. Change it in vibe.md and run /santa-join again.`);
+      }
+      drop();
+      return { joined_as: reg.name, your_budget: reg.budget, currency: this.currency, players: total + 1 };
+    })();
+  }
+
   join(tokenHash: string, name: string, budget: number, inviteCode?: string) {
+    if (this.mailer) throw new GameError("This game needs your email address to join.");
     this.requirePhaseForJoin();
     if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.");
     const n = clean(name, LIMITS.name, "name");
@@ -364,6 +521,20 @@ export class Game {
     })();
   }
 
+  /** Host fallback when mail does not arrive: confirms the newest pending registration for an address. */
+  adminConfirm(email: string): string {
+    const row = this.db
+      .query("SELECT token_hash FROM registrations WHERE email = ? ORDER BY expires_at DESC LIMIT 1")
+      .get(email.trim().toLowerCase()) as { token_hash: string } | null;
+    if (!row) throw new GameError("No pending registration for that address. The player must run /santa-join first.");
+    return this.promote(row.token_hash).joined_as;
+  }
+
+  /** Addresses that asked for a code and have not confirmed. Host only. */
+  adminPending(): string[] {
+    return (this.db.query("SELECT DISTINCT email FROM registrations ORDER BY email").all() as { email: string }[]).map((r) => r.email);
+  }
+
   /** Lobby only: frees a name after a typo or a lost token. */
   removePlayer(name: string): void {
     if (this.phase() !== "lobby") throw new GameError("Players can only be removed before the draw.");
@@ -385,6 +556,7 @@ export class Game {
       questions: c("questions"),
       hints: c("hints"),
       guesses: c("guesses"),
+      pending_confirmations: c("registrations"),
     };
   }
 }

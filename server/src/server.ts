@@ -8,6 +8,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { openDb } from "./db.ts";
 import { Game, GameError, LIMITS } from "./game.ts";
+import { cloudflareMailer } from "./mail.ts";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
 
@@ -18,11 +19,11 @@ function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): M
     name: string,
     description: string,
     inputSchema: S,
-    run: (args: z.infer<z.ZodObject<S>>) => unknown,
+    run: (args: z.infer<z.ZodObject<S>>) => unknown | Promise<unknown>,
   ) => {
     mcp.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>) => {
       try {
-        const result = run(args);
+        const result = await run(args);
         log(`${name} ok`);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
@@ -39,9 +40,25 @@ function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): M
 
   tool(
     "join",
-    "Join the game under a display name, with your budget for the gift you give. Only possible before the draw.",
-    { name: z.string().max(LIMITS.name), budget: z.number(), invite_code: z.string().max(64).optional() },
-    (a) => game.join(tokenHash, a.name, a.budget, a.invite_code),
+    game.emailMode
+      ? "Ask to join the game: display name, budget for the gift you give, and your email address. A six-digit code is mailed to that address; finish with the confirm tool."
+      : "Join the game under a display name, with your budget for the gift you give. Only possible before the draw.",
+    {
+      name: z.string().max(LIMITS.name),
+      budget: z.number(),
+      email: z.string().max(254).optional(),
+      invite_code: z.string().max(64).optional(),
+    },
+    (a) =>
+      game.emailMode
+        ? game.requestJoin(tokenHash, a.name, a.budget, a.email ?? "", a.invite_code)
+        : game.join(tokenHash, a.name, a.budget, a.invite_code),
+  );
+  tool(
+    "confirm",
+    "Finish joining with the six-digit code from the confirmation email. Pass the code as a string.",
+    { code: z.string().max(12) },
+    (a) => game.confirm(tokenHash, a.code),
   );
   tool(
     "set_budget",
@@ -125,14 +142,19 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
 if (import.meta.main) {
   const port = Number(process.env.SANTA_PORT ?? 8787);
   const hostname = process.env.SANTA_HOST ?? "127.0.0.1";
+  // Log lines carry the tool name and outcome only: no names, no text, no tokens, no addresses.
+  const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+  const { SANTA_MAIL_ACCOUNT_ID: accountId, SANTA_MAIL_TOKEN: mailToken, SANTA_MAIL_FROM: from } = process.env;
+  const mailer = accountId && mailToken && from ? cloudflareMailer({ accountId, token: mailToken, from }) : undefined;
   const game = new Game(openDb(process.env.SANTA_DB ?? "data/santa.db"), {
+    mailer,
+    mailDailyCap: Number(process.env.SANTA_MAIL_DAILY_CAP ?? 300),
+    log,
     inviteCode: process.env.SANTA_INVITE_CODE,
     minBudget: Number(process.env.SANTA_MIN_BUDGET ?? 20),
     currency: process.env.SANTA_CURRENCY ?? "EUR",
     maxPlayers: Number(process.env.SANTA_MAX_PLAYERS ?? LIMITS.maxPlayers),
   });
-  // Log lines carry the tool name and outcome only: no names, no text, no tokens.
-  const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
   Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log) });
-  console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()})`);
+  console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()}, email confirmation: ${game.emailMode ? "on" : "off"})`);
 }

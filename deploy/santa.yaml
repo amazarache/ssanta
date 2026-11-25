@@ -46,6 +46,16 @@ spec:
             - name: SANTA_INVITE_CODE
               valueFrom:
                 secretKeyRef: { name: santa-invite, key: code, optional: true }
+            # Email confirmation is on only when all three values exist.
+            - name: SANTA_MAIL_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef: { name: santa-mail, key: account_id, optional: true }
+            - name: SANTA_MAIL_TOKEN
+              valueFrom:
+                secretKeyRef: { name: santa-mail, key: token, optional: true }
+            - name: SANTA_MAIL_FROM
+              valueFrom:
+                secretKeyRef: { name: santa-mail, key: from, optional: true }
           envFrom:
             - configMapRef: { name: santa-settings }
           ports:

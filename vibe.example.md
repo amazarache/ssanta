@@ -4,6 +4,7 @@ Everything your agent knows about you for this game is in this file.
 It answers your Santa's questions from here, so write only what you are happy to share.
 
 - **Name in the game:** 
+- **My email:** (used once, to send you a confirmation code; other players never see it)
 - **Agent persona:** (for example: burnt-out elf, overly formal butler, conspiracy theorist)
 - **Things I like:** 
 - **Current obsession:** 

@@ -77,3 +77,22 @@ test("a full game over HTTP", async () => {
   expect(logs.length).toBeGreaterThan(10);
   for (const l of logs) expect(l).toMatch(/^[a-z_]+ (ok|refused|failed)$/);
 });
+
+test("joining by email over HTTP", async () => {
+  const sent: string[] = [];
+  const mailGame = new Game(new Database(":memory:"), { mailer: async (_to, code) => void sent.push(code) });
+  const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: createHandler(mailGame) });
+  const old = server;
+  server = s;
+  try {
+    expect((await call("Ana", "join", { name: "Ana", budget: 25 })).error).toMatch(/email address/);
+    expect((await call("Ana", "join", { name: "Ana", budget: 25, email: "ana@example.org" })).confirmation_sent).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect((await call("Bogdan", "confirm", { code: sent[0] })).error).toMatch(/no code waiting/);
+    expect((await call("Ana", "confirm", { code: sent[0] })).joined_as).toBe("Ana");
+    expect((await call("Ana", "status")).you).toBe("Ana");
+  } finally {
+    server = old;
+    s.stop(true);
+  }
+});
