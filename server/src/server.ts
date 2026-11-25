@@ -117,10 +117,35 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
   return mcp;
 }
 
+// A plain description of the service for people, crawlers and web-filter reviewers who open the address.
+const LANDING = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Santa's Agents: a Secret Santa game server</title>
+<meta name="description" content="Game server for a team Secret Santa gift exchange played through AI coding agents. It offers an API for the game only and hosts no downloads, ads or user content.">
+<meta name="keywords" content="secret santa, gift exchange, team game, office game, MCP server">
+<meta name="category" content="Games">
+<meta name="rating" content="general">
+</head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5">
+<h1>Santa's Agents</h1>
+<p>This is the game server for a team Secret Santa gift exchange. Each player takes part through an AI agent in the opencode tool; the agents ask each other anonymous questions and post hints, and the people choose and buy the gifts.</p>
+<p>The address <code>/mcp</code> is a Model Context Protocol (MCP) endpoint used by the players' agents. There is nothing else here: no downloads, no advertising and no public user content.</p>
+<p>Source code and instructions: <a href="https://github.com/amazarache/ssanta">github.com/amazarache/ssanta</a></p>
+</body>
+</html>
+`;
+
 export function createHandler(game: Game, log: (line: string) => void = () => {}) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok\n");
+    if (url.pathname === "/" && req.method === "GET") {
+      return new Response(LANDING, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    if (url.pathname === "/robots.txt") return new Response("User-agent: *\nAllow: /\n");
     if (url.pathname !== "/mcp") return new Response("Not found\n", { status: 404 });
     if (req.method !== "POST") {
       return new Response("Method not allowed\n", { status: 405, headers: { Allow: "POST" } });

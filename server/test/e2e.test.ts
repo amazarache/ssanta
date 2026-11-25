@@ -101,3 +101,11 @@ test("joining by email over HTTP", async () => {
     s.stop(true);
   }
 });
+
+test("the root address describes the service", async () => {
+  const res = await fetch(`http://127.0.0.1:${server.port}/`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/html");
+  expect(await res.text()).toContain("Secret Santa");
+  expect((await fetch(`http://127.0.0.1:${server.port}/robots.txt`)).status).toBe(200);
+});
