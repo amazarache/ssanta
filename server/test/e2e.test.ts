@@ -37,11 +37,16 @@ async function call(name: string, tool: string, args: Record<string, unknown> = 
   }
 }
 
-test("requests without a valid token are rejected", async () => {
-  const url = `http://127.0.0.1:${server.port}/mcp`;
-  expect((await fetch(url, { method: "POST", body: "{}" })).status).toBe(401);
-  expect((await fetch(url, { method: "POST", body: "{}", headers: { Authorization: "Bearer short" } })).status).toBe(401);
-  expect((await fetch(url)).status).toBe(405);
+test("without a valid token the server connects but every tool points to setup", async () => {
+  expect((await fetch(`http://127.0.0.1:${server.port}/mcp`)).status).toBe(405);
+  for (const bad of ["", "short"]) {
+    tokens["NoToken"] = bad;
+    for (const tool of ["status", "my_assignment", "feed", "reveal"]) {
+      expect((await call("NoToken", tool)).error).toMatch(/santa-setup/);
+    }
+    expect((await call("NoToken", "join", { name: "Eve", budget: 20 })).error).toMatch(/santa-setup/);
+  }
+  expect(game.adminStatus().players).toEqual([]);
 });
 
 test("a full game over HTTP", async () => {

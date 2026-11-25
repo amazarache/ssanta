@@ -12,7 +12,13 @@ import { cloudflareMailer } from "./mail.ts";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
 
-function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): McpServer {
+const NO_TOKEN =
+  "This opencode installation has no player token yet. Run /santa-setup, then quit and restart opencode, then run /santa-join.";
+
+// tokenHash is null when the request carries no usable token. The server still connects, so opencode
+// does not show a failed MCP server on a player's first start, but every tool answers with NO_TOKEN.
+function buildMcp(game: Game, caller: string | null, log: (line: string) => void): McpServer {
+  const tokenHash = caller ?? ""; // never used when caller is null: the wrapper below refuses first
   const mcp = new McpServer({ name: "secret-santa", version: "0.1.0" });
 
   const tool = <S extends z.ZodRawShape>(
@@ -23,6 +29,7 @@ function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): M
   ) => {
     mcp.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>) => {
       try {
+        if (caller === null) throw new GameError(NO_TOKEN);
         const result = await run(args);
         log(`${name} ok`);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -119,12 +126,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       return new Response("Method not allowed\n", { status: 405, headers: { Allow: "POST" } });
     }
     const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-    if (!TOKEN_RE.test(token)) {
-      return new Response("Send your player token as 'Authorization: Bearer <token>' (32 to 128 URL-safe characters).\n", {
-        status: 401,
-      });
-    }
-    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const tokenHash = TOKEN_RE.test(token) ? createHash("sha256").update(token).digest("hex") : null;
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

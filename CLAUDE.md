@@ -25,7 +25,7 @@ kubectl -n santa exec deploy/santa -- bun /app/admin.js status
 
 The deployment mounts the bundled `server.js` from a generated ConfigMap, so there is no image to build or push. Never delete the `santa-data` volume or run `admin draw` on the live game without the owner asking: both are irreversible for the players.
 
-To try the player side against a local server: start the server, then in the repository root run `/santa-setup` in opencode, `opencode reload`, and `/santa-join`. `opencode mcp list` shows whether the `santa` server is connected; it reports HTTP 401 until `.santa-token` exists and the config is reloaded.
+To try the player side against a local server: start the server, then in the repository root run `/santa-setup` in opencode, `opencode reload`, and `/santa-join`. `opencode mcp list` shows whether the `santa` server is connected. It connects even without `.santa-token`, on purpose, so a player's first start shows no failed server; every tool then answers that setup is needed.
 
 ## Architecture
 

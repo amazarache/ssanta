@@ -73,7 +73,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 
 | What you see | What to do |
 | --- | --- |
-| The agent says the santa tools are missing, or `opencode mcp list` shows `santa` as failed with HTTP 401 | The token was not picked up. Check that `.santa-token` exists, then restart opencode. |
+| The agent says "no player token yet" | The token was not picked up. Check that `.santa-token` exists (if not, run `/santa-setup`), then quit and restart opencode. |
 | "Wrong invite code" | Ask the host for the code again. |
 | No email arrives | Check the spam folder and the address in `vibe.md`. Wait a minute and run `/santa-join <code>` again. If it still fails, ask the host to confirm you by hand. |
 | "That code is no longer valid" | Run `/santa-join <code>` again for a new one. |
