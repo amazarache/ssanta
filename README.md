@@ -125,9 +125,9 @@ The game server already runs on the k3s cluster and is reachable at `https://san
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                    # who is waiting: address, requested name, how long ago
    kubectl -n santa exec deploy/santa -- bun /app/admin.js confirm ana@example.org
-   kubectl -n santa exec deploy/santa -- bun /app/admin.js reject ana@example.org     # drop the requests for an address
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js reject ana@example.org     # clear everything pending for an address, so the player can ask again at once
    ```
-   Confirm an address only after the player has told you directly that they just ran `/santa-join`. A request shows that somebody typed the address, not that its owner did. The command refuses when several installations asked for the same address, and when the address already plays; for a player who really lost their token, check with them and add `--rebind`.
+   Confirm an address only after the player has told you directly that they just ran `/santa-join`. A request shows that somebody typed the address, not that its owner did. The command refuses when several installations asked for the same address (run `reject`, then have the player ask once more), and when the address already plays; for a player who really lost their token, check with them and add `--rebind`. Requests stay on the list for 7 days.
 8. If someone joined under a wrong name, remove them so they can join again. This works only before the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js remove "Ana"

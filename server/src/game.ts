@@ -160,6 +160,7 @@ export class Game {
         attempts INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS mail_log (email TEXT NOT NULL, sent_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS join_attempts (email TEXT NOT NULL, token_hash TEXT NOT NULL, at INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
     // Databases created before email confirmation have no email column.
@@ -248,7 +249,7 @@ export class Game {
     if (!this.mailer) throw new GameError("This game does not use email confirmation.");
     if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.", "invite");
     const e = String(email ?? "").trim().toLowerCase();
-    if (e.length > 254 || !EMAIL_RE.test(e)) throw new GameError("That does not look like an email address.", "email");
+    if (e.length > 254 || /[\p{Cc}\p{Cf}\p{Z}]/u.test(e) || !EMAIL_RE.test(e)) throw new GameError("That does not look like an email address.", "email");
     const n = this.cleanName(name);
     const b = this.budget(budget);
     const already = this.db.query("SELECT name FROM players WHERE token_hash = ?").get(tokenHash) as { name: string } | null;
@@ -257,6 +258,11 @@ export class Game {
     const now = this.now().getTime();
     const dayStart = Date.parse(`${this.today()}T00:00:00Z`);
     const count = (sql: string, ...a: (string | number)[]) => (this.db.query(sql).get(...a) as { c: number }).c;
+    this.purge();
+
+    // Recorded before any limit can refuse the request, so the host always sees every installation that asked for an address.
+    this.db.query("INSERT INTO join_attempts (email, token_hash, at) VALUES (?, ?, ?)").run(e, tokenHash, now);
+
     if (count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at > ?", e, now - MAIL_COOLDOWN_MS) > 0) {
       throw new GameError("A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.", "mail_cooldown");
     }
@@ -266,12 +272,14 @@ export class Game {
     if (count("SELECT COUNT(*) AS c FROM mail_log WHERE sent_at >= ?", dayStart) >= this.mailDailyCap) {
       throw new GameError("The server reached its email limit for today. Try again tomorrow or ask the host to confirm you.", "mail_daily_cap");
     }
+    // Counted for every accepted request, sent or not, so the limits above behave the same for any address.
+    this.db.query("INSERT INTO mail_log (email, sent_at) VALUES (?, ?)").run(e, now);
 
     // New players can only join in the lobby. An address that already plays may confirm at any time, to recover a lost token.
+    const lobby = this.phase() === "lobby";
     const known = count("SELECT COUNT(*) AS c FROM players WHERE email = ?", e) > 0;
-    if (this.phase() !== "lobby" && !known) return CODE_SENT_REPLY;
+    if (!lobby && !known) return CODE_SENT_REPLY;
 
-    this.db.query("DELETE FROM registrations WHERE expires_at < ?").run(now - PENDING_KEEP_MS);
     const code = String(this.rand(1_000_000)).padStart(6, "0");
     this.db
       .query(
@@ -281,7 +289,6 @@ export class Game {
       )
       .run(tokenHash, e, n, b, this.codeHash(tokenHash, code), now + CODE_TTL_MS);
 
-    this.db.query("INSERT INTO mail_log (email, sent_at) VALUES (?, ?)").run(e, now);
     try {
       await this.mailer(e, code);
       this.log("mail ok");
@@ -289,11 +296,21 @@ export class Game {
       // The pending registration stays, so the host can still let the player in with `admin confirm`.
       const m = err instanceof MailError ? err : new MailError(0, null);
       this.log(m.message);
+      // After the draw a failure would show that the address plays, so the reply stays the same.
+      if (!lobby) return CODE_SENT_REPLY;
       if (m.code === 10208) throw new GameError("The mail service refused this address (the host's mail plan only allows verified addresses). Your request is saved: ask the host to confirm you by hand.", "mail_failed");
       if (m.status === 429) throw new GameError("The mail service limit is reached. Your request is saved: try again later, or ask the host to confirm you by hand.", "mail_failed");
       throw new GameError("The confirmation email could not be sent. Check the address in vibe.md. Your request is saved: the host can also confirm you by hand.", "mail_failed");
     }
     return CODE_SENT_REPLY;
+  }
+
+  /** Drops requests and attempts too old for the host to act on. */
+  private purge(): void {
+    const cutoff = this.now().getTime() - PENDING_KEEP_MS;
+    this.db.query("DELETE FROM registrations WHERE expires_at < ?").run(cutoff + CODE_TTL_MS);
+    this.db.query("DELETE FROM join_attempts WHERE at < ?").run(cutoff);
+    this.db.query("DELETE FROM mail_log WHERE sent_at < ?").run(cutoff);
   }
 
   /** Email mode, step 2. */
@@ -306,7 +323,7 @@ export class Game {
     const restart = "Run /santa-join again to get a new code.";
     if (!reg) throw new GameError(`There is no code waiting for you. ${restart}`, "no_code");
     if (reg.expires_at < this.now().getTime() || reg.attempts >= CODE_ATTEMPTS) {
-      this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
+      // The request itself stays, so the host can still confirm it by hand.
       throw new GameError(`That code is no longer valid. ${restart}`, "code_expired");
     }
     if (reg.code_hash !== this.codeHash(tokenHash, c)) {
@@ -317,14 +334,20 @@ export class Game {
   }
 
   /** Turns a pending registration into a player, or moves an existing player to this token. */
-  private promote(tokenHash: string) {
+  private promote(tokenHash: string, expectedEmail?: string) {
     return this.db.transaction(() => {
       const reg = this.db.query("SELECT email, name, budget FROM registrations WHERE token_hash = ?").get(tokenHash) as {
         email: string;
         name: string;
         budget: number;
+      } | null;
+      if (!reg || (expectedEmail !== undefined && reg.email !== expectedEmail)) {
+        throw new GameError("That request changed or was withdrawn in the meantime. Look at the pending list again.", "no_code");
+      }
+      const drop = () => {
+        this.db.query("DELETE FROM registrations WHERE email = ?").run(reg.email);
+        this.db.query("DELETE FROM join_attempts WHERE email = ?").run(reg.email);
       };
-      const drop = () => this.db.query("DELETE FROM registrations WHERE email = ?").run(reg.email);
       const existing = this.db.query("SELECT id, name FROM players WHERE email = ?").get(reg.email) as Player | null;
       if (existing) {
         this.db.query("UPDATE players SET token_hash = ? WHERE id = ?").run(tokenHash, existing.id);
@@ -532,55 +555,81 @@ export class Game {
     })();
   }
 
+  /** How many different installations asked to join with this address recently. */
+  private installationsFor(email: string): number {
+    return (
+      this.db
+        .query(
+          `SELECT COUNT(*) AS c FROM (SELECT token_hash FROM join_attempts WHERE email = ?1
+           UNION SELECT token_hash FROM registrations WHERE email = ?1)`,
+        )
+        .get(email) as { c: number }
+    ).c;
+  }
+
   /**
    * Host fallback when mail does not arrive. The host has not seen proof that the request came from the
    * owner of the address, so this refuses the two cases where a wrong confirmation does damage:
-   * several requests for one address, and an address that already plays (which would move that player).
+   * several installations asking for one address, and an address that already plays (which would move that player).
+   * Runs as one immediate transaction: the server process may be handling join requests at the same time.
    */
   adminConfirm(email: string, opts: { rebind?: boolean } = {}): string {
     const e = email.trim().toLowerCase();
-    const rows = this.db.query("SELECT token_hash FROM registrations WHERE email = ?").all(e) as { token_hash: string }[];
-    if (rows.length === 0) throw new GameError("No pending registration for that address. The player must run /santa-join first.");
-    if (rows.length > 1) {
-      throw new GameError(
-        `${rows.length} different installations asked to join with that address, and only one can be the owner's. Run 'reject' for the address, then ask the player to run /santa-join once more.`,
-      );
-    }
-    const existing = this.db.query("SELECT name FROM players WHERE email = ?").get(e) as { name: string } | null;
-    if (existing && !opts.rebind) {
-      throw new GameError(
-        `That address already plays as ${existing.name}. Confirming would move ${existing.name} to another installation, which could then read their assignment. Check with ${existing.name} directly that they lost their token, then repeat with --rebind.`,
-      );
-    }
-    return this.promote(rows[0]!.token_hash).joined_as;
+    return this.db
+      .transaction(() => {
+        this.purge();
+        const asked = this.installationsFor(e);
+        if (asked > 1) {
+          throw new GameError(
+            `${asked} different installations asked to join with that address, and only one can be the owner's. Run 'reject' for the address, then ask the player to run /santa-join once more.`,
+          );
+        }
+        const row = this.db.query("SELECT token_hash FROM registrations WHERE email = ?").get(e) as { token_hash: string } | null;
+        if (!row) throw new GameError("No pending registration for that address. The player must run /santa-join first.");
+        const existing = this.db.query("SELECT name FROM players WHERE email = ?").get(e) as { name: string } | null;
+        if (existing && !opts.rebind) {
+          throw new GameError(
+            `That address already plays as ${existing.name}. Confirming would move ${existing.name} to another installation, which could then read their assignment. Check with ${existing.name} directly that they lost their token, then repeat with --rebind.`,
+          );
+        }
+        return this.promote(row.token_hash, e).joined_as;
+      })
+      .immediate();
   }
 
-  /** Drops every pending request for an address. */
-  adminReject(email: string): number {
-    return this.db.query("DELETE FROM registrations WHERE email = ?").run(email.trim().toLowerCase()).changes;
+  /** Clears everything pending for an address, including its mail limits, so the owner can ask again at once. */
+  adminReject(email: string): void {
+    const e = email.trim().toLowerCase();
+    const n =
+      this.db.query("DELETE FROM registrations WHERE email = ?").run(e).changes +
+      this.db.query("DELETE FROM join_attempts WHERE email = ?").run(e).changes;
+    if (n === 0) throw new GameError("Nothing is pending for that address. Check the spelling against the pending list.");
+    this.db.query("DELETE FROM mail_log WHERE email = ?").run(e);
   }
 
   /** Requests that asked for a code and have not confirmed. Host only. */
   adminPending() {
+    this.purge();
     const now = this.now().getTime();
-    return (
-      this.db
-        .query(
-          `SELECT r.email, r.name, r.expires_at, p.name AS plays_as,
-                  (SELECT COUNT(*) FROM registrations x WHERE x.email = r.email) AS requests
-           FROM registrations r LEFT JOIN players p ON p.email = r.email ORDER BY r.email, r.expires_at`,
-        )
-        .all() as { email: string; name: string; expires_at: number; plays_as: string | null; requests: number }[]
-    ).map((r) => ({
-      email: r.email,
-      requested_name: r.name,
-      minutes_ago: Math.max(0, Math.round((now - (r.expires_at - CODE_TTL_MS)) / 60000)),
-      note: r.plays_as
-        ? `already plays as ${r.plays_as}: confirming moves that player (needs --rebind)`
-        : r.requests > 1
-          ? `${r.requests} requests for this address`
-          : "",
-    }));
+    const rows = this.db
+      .query(
+        `SELECT r.email, r.name, r.expires_at, p.name AS plays_as
+         FROM registrations r LEFT JOIN players p ON p.email = r.email ORDER BY r.email, r.expires_at`,
+      )
+      .all() as { email: string; name: string; expires_at: number; plays_as: string | null }[];
+    return rows.map((r) => {
+      const asked = this.installationsFor(r.email);
+      const notes = [
+        asked > 1 ? `${asked} installations asked for this address: reject it and have the player ask again` : "",
+        r.plays_as ? `already plays as ${r.plays_as}: confirming moves that player (needs --rebind)` : "",
+      ].filter(Boolean);
+      return {
+        email: r.email,
+        requested_name: r.name,
+        minutes_ago: Math.max(0, Math.round((now - (r.expires_at - CODE_TTL_MS)) / 60000)),
+        note: notes.join("; "),
+      };
+    });
   }
 
   /** Lobby only: frees a name after a typo or a lost token. */
