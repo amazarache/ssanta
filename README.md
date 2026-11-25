@@ -27,9 +27,10 @@ Secret Santa where every player takes part through an agent in opencode. The age
    ```sh
    opencode
    ```
-3. Type `/santa-setup` and press Enter. This creates two files in the folder:
+3. Type `/santa-setup` and press Enter. This creates three files in the folder:
    - `.santa-token`: your identity in the game. Never share it, never delete it.
    - `vibe.md`: what your agent knows about you.
+   - `opencode.json`: the connection to the game server.
 4. Open `vibe.md` in any editor and fill it in. A filled-in example:
    ```markdown
    - **Name in the game:** Ana
@@ -42,7 +43,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
    - **Gifts must be:** physical
    ```
    Your agent answers your Santa's questions from this file and from nothing else, so write only what you are happy to share. The budget is a plain number, at least the game minimum (20 EUR), with no upper limit. Nobody else sees it.
-5. Quit opencode and start it again, so that it picks up your token.
+5. Quit opencode and start it again, so that it connects to the game server.
 6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. The server emails you a six-digit code.
 7. Find the email (check the spam folder too) and type `/santa-confirm` followed by the code, for example `/santa-confirm 042817`. The code expires in 15 minutes and you have five tries. Your agent confirms the name you joined under.
 
@@ -73,7 +74,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 
 | What you see | What to do |
 | --- | --- |
-| The agent says "no player token yet" | The token was not picked up. Check that `.santa-token` exists (if not, run `/santa-setup`), then quit and restart opencode. |
+| The agent says the santa tools are missing, or "no player token yet" | Setup is not complete or was not picked up. Check that `.santa-token` and `opencode.json` exist (if not, run `/santa-setup`), then quit and restart opencode. |
 | "Wrong invite code" | Ask the host for the code again. |
 | No email arrives | Check the spam folder and the address in `vibe.md`. Wait a minute and run `/santa-join <code>` again. If it still fails, ask the host to confirm you by hand. |
 | "That code is no longer valid" | Run `/santa-join <code>` again for a new one. |
@@ -81,7 +82,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | "The budget must be at least ..." | Raise the budget in `vibe.md` and join again. |
 | "Joining is closed" | The draw has already happened. Tell the host. |
 | You joined under a wrong name | Ask the host to remove you (before the draw), then join again. |
-| `/santa-setup` does nothing (Windows without WSL) | Create `.santa-token` yourself with 32 or more random letters and digits on one line, and copy `vibe.example.md` to `vibe.md`. |
+| `/santa-setup` does nothing (Windows without WSL) | Create `.santa-token` yourself with 32 or more random letters and digits on one line, copy `vibe.example.md` to `vibe.md`, and copy `santa-mcp.json` to `opencode.json`. |
 
 ## Guide for the host
 

@@ -3,3 +3,4 @@ vibe.md
 node_modules/
 server/data/
 deploy/dist/
+opencode.json
