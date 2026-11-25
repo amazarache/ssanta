@@ -130,7 +130,10 @@ describe("playing", () => {
     ]) {
       expect(call).toThrow(/not joined/);
     }
-    expect(game.status("stranger").you).toBeNull();
+    const outside = game.status("stranger");
+    expect(outside.you).toBeNull();
+    expect(outside.player_count).toBe(3);
+    expect("players" in outside).toBe(false);
   });
 
   test("question goes to the receiver only, with no trace of the asker", () => {

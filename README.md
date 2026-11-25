@@ -44,7 +44,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
    ```
    Your agent answers your Santa's questions from this file and from nothing else, so write only what you are happy to share. The budget is a plain number, at least the game minimum (20 EUR), with no upper limit. Nobody else sees it.
 5. Quit opencode and start it again, so that it loads the game agent and connects to the game server.
-6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. The server emails you a six-digit code.
+6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. The server emails you a six-digit code. Your agent also shows you a request reference, six letters and digits such as `K7Q42M`: keep it in case the email does not come.
 7. Find the email (check the spam folder too) and type `/santa-confirm` followed by the code, for example `/santa-confirm 042817`. The code expires in 15 minutes and you have five tries. Your agent confirms the name you joined under.
 
 You are in. Nothing more happens until the host runs the draw.
@@ -85,7 +85,9 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | --- | --- |
 | The agent says the santa tools are missing, or "no player token yet" | Setup is not complete or was not picked up. Check that `.santa-token` and `opencode.json` exist (if not, run `/santa-setup`), then quit and restart opencode. |
 | "Wrong invite code" | Ask the host for the code again. |
-| No email arrives | Check the spam folder and the address in `vibe.md`. Wait a minute and run `/santa-join <code>` again. If it still fails, ask the host to confirm you by hand. |
+| No email arrives, or the agent says the mail could not be sent | Check the spam folder and the address in `vibe.md`. If it still does not come, send the host your email address and the request reference your agent showed you, and they let you in by hand. Running `/santa-join <code>` again shows the reference again. |
+| "That does not look like an email address" | Use a plain address: letters, digits, dots, dashes, underscores and plus signs. |
+| "Too many join requests are waiting" | Tell the host. |
 | "That code is no longer valid" | Run `/santa-join <code>` again for a new one. |
 | "The name ... is taken" | Change the name in `vibe.md` and run `/santa-join <code>` again. |
 | "The budget must be at least ..." | Raise the budget in `vibe.md` and join again. |
@@ -121,13 +123,16 @@ The game server already runs on the k3s cluster and is reachable at `https://san
 5. Send the team three things: the repository link, the invite code, and the date by which they must join. A message you can adapt:
    > Secret Santa, played by our agents. Clone https://github.com/amazarache/ssanta, open opencode in it and follow "Guide for players" in the README. Invite code: `<code>`. Minimum budget 20 EUR, no upper limit. Join by `<date>`; the draw is on `<date>`, the reveal on `<date>`.
 6. Watch the lobby fill up with the `status` command from step 2.
-7. If a player's confirmation email does not arrive, confirm them by hand. They must have run `/santa-join` first:
+7. If a player's confirmation email does not arrive, let them in by hand. The player sends you two things: their email address and the request reference their agent showed them when they ran `/santa-join`.
    ```sh
-   kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                    # who is waiting: address, requested name, how long ago
-   kubectl -n santa exec deploy/santa -- bun /app/admin.js confirm ana@example.org
-   kubectl -n santa exec deploy/santa -- bun /app/admin.js reject ana@example.org     # clear everything pending for an address, so the player can ask again at once
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                           # who is waiting: address, requested name, how long ago
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js confirm ana@example.org K7Q42M    # address and reference, both from the player
    ```
-   Confirm an address only after the player has told you directly that they just ran `/santa-join`. A request shows that somebody typed the address, not that its owner did. The command refuses when several installations asked for the same address (run `reject`, then have the player ask once more), and when the address already plays; for a player who really lost their token, check with them and add `--rebind`. Requests stay on the list for 7 days.
+   - The reference is the proof. Anyone with the invite code can file a request under any address, but only the installation that filed it is shown its reference, and `pending` never prints one. So take the reference only from the player, on a channel where you know it is them.
+   - Every valid request is on the list for 7 days, whether or not a mail went out.
+   - If the address already plays, `confirm` refuses: confirming would move that player to another installation. For a player who really lost their token, check with them and add `--rebind`.
+   - To tidy up: `reject ana@example.org` clears the requests for one address, and `reject --all` clears the whole list. Both also lift the mail limits, so the players can ask again at once.
+   - If the list fills with requests you do not recognise, someone is misusing the invite code. Clear the list with `reject --all`, change the invite code (see "Changing the settings"), and give the new one to your players.
 8. If someone joined under a wrong name, remove them so they can join again. This works only before the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js remove "Ana"
@@ -177,8 +182,9 @@ A new minimum applies to players who join or change their budget afterwards; bud
 | --- | --- |
 | `curl .../healthz` does not print `ok` | `kubectl -n santa get pods` should show one `santa` pod and two `cloudflared` pods, all Running. `kubectl -n santa logs deploy/santa` shows the server's log. |
 | A player cannot connect, others can | It is on the player's side: missing `.santa-token` or opencode not restarted. |
-| A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. If the mail does not arrive, check with them directly and run `admin.js confirm <email> --rebind`. |
-| Many players report that no email arrives | The mail service may have hit its daily limit. `kubectl -n santa logs deploy/santa` shows `mail failed <status>/<code>` lines; 429 means the limit. Confirm players by hand meanwhile. |
+| A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. If the mail does not arrive, check with them directly and run `admin.js confirm <email> <reference> --rebind`. |
+| Many players report that no email arrives | `kubectl -n santa logs deploy/santa` shows `mail failed <status>/<code>` lines: 429 means the mail service's limit, 403/10208 means its plan only sends to verified addresses. Their requests are saved all the same; confirm them by hand with the reference each one sends you. |
+| The server log says `JOINING IS OFF` | Email confirmation is on but no invite code is set. Create the `santa-invite` secret and restart the server. |
 
 ### After the game
 
@@ -212,7 +218,7 @@ Change the host name in `deploy/santa.yaml` and the storage class if you do not 
 
 ### Email confirmation
 
-When the three mail settings below are present, joining needs a six-digit code sent to the player's email address through the Cloudflare Email Service. Without them, `/santa-join` adds the player directly. Any email domain is accepted, so keep an invite code set: it is what stops strangers from making your server send mail.
+When the three mail settings below are present, joining needs a six-digit code sent to the player's email address through the Cloudflare Email Service. Without them, `/santa-join` adds the player directly. Any email domain is accepted, so email confirmation only works with an invite code set: the code is what stops strangers from making your server send mail, and without one the server refuses every join request.
 
 On Kubernetes the settings come from one secret; create it and restart the server:
 
@@ -224,7 +230,9 @@ kubectl -n santa create secret generic santa-mail \
 kubectl -n santa rollout restart deploy/santa
 ```
 
-Limits: one code per address per minute, five per address per day, and `SANTA_MAIL_DAILY_CAP` in total per day.
+Limits on mail: one code per address per minute, five per address per day, and `SANTA_MAIL_DAILY_CAP` in total per day. A limit stops the mail, not the request: the player is told that the request is saved and can be confirmed by hand. At most three times `SANTA_MAX_PLAYERS` requests can wait at once.
+
+The server does not limit how often it is called. If you expose it to the internet, add a rate-limiting rule at your proxy or CDN.
 
 ### Server settings (environment variables)
 
@@ -233,11 +241,13 @@ Limits: one code per address per minute, five per address per day, and `SANTA_MA
 | `SANTA_MIN_BUDGET` | `20` | Smallest budget a player may set. There is no upper limit. |
 | `SANTA_CURRENCY` | `EUR` | Label shown next to amounts. |
 | `SANTA_MAX_PLAYERS` | `200` | Joining stops at this number. |
-| `SANTA_INVITE_CODE` | none | If set, players need it to join. |
+| `SANTA_INVITE_CODE` | none | If set, players need it to join. Required when email confirmation is on. |
 | `SANTA_MAIL_ACCOUNT_ID`, `SANTA_MAIL_TOKEN`, `SANTA_MAIL_FROM` | none | Cloudflare account ID, API token and sender address. All three switch email confirmation on. |
 | `SANTA_MAIL_DAILY_CAP` | `300` | Most confirmation emails per day. |
 | `SANTA_HOST`, `SANTA_PORT` | `127.0.0.1`, `8787` | Where the server listens. |
 | `SANTA_DB` | `data/santa.db` | The game's database file. |
+
+The admin command reads the same variables, so run it in the same environment as the server (on Kubernetes, `kubectl exec` into the pod does that).
 
 ## What stays secret, and from whom
 

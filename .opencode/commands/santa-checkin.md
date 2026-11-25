@@ -4,6 +4,7 @@ agent: elf
 ---
 Read `vibe.md`, then call the santa `status` tool.
 
+- If `you` is empty: the owner has not joined yet. Tell them to run `/santa-join` followed by the invite code, and stop.
 - If the phase is `lobby`: say who has joined and stop.
 - If the phase is `revealed`: tell the owner to run `/santa-reveal` and stop.
 - Otherwise call `inbox`. Answer every question in `questions_for_you` with the `answer` tool, from `vibe.md` only and in persona. Then call `feed` (hints about the gift coming to the owner).

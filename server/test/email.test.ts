@@ -1,285 +1,581 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { Game } from "../src/game.ts";
+import { Game, type GameOptions } from "../src/game.ts";
 import { cloudflareMailer, MailError } from "../src/mail.ts";
 
-function setup(opts = {}) {
+const INVITE = "elf-invite";
+const REF = /^[0-9A-HJKMNP-TV-Z]{6}$/;
+
+function setup(opts: GameOptions = {}) {
   let t = Date.parse("2026-12-01T10:00:00Z");
   const sent: { to: string; code: string }[] = [];
   const logs: string[] = [];
   const db = new Database(":memory:");
   const game = new Game(db, {
     now: () => new Date(t),
+    inviteCode: INVITE,
     mailer: async (to, code) => void sent.push({ to, code }),
     log: (l) => logs.push(l),
     ...opts,
   });
   const wait = (ms: number) => (t += ms);
+  /** Files a join request the way a player's agent does. */
+  const ask = (token: string, name: string, email: string, budget = 20) => game.requestJoin(token, name, budget, email, INVITE);
+  /** The same, but an error becomes its message: what the player gets to read either way. */
+  const said = (token: string, name: string, email: string, budget = 20) =>
+    ask(token, name, email, budget).then(JSON.stringify, (e: Error) => `error: ${e.message}`);
   const signUp = async (token: string, name: string, email: string) => {
-    await game.requestJoin(token, name, 20, email);
+    await ask(token, name, email);
     wait(61_000);
     return game.confirm(token, sent.at(-1)!.code);
   };
-  return { game, db, sent, logs, wait, signUp };
+  const lastCode = () => sent.at(-1)!.code;
+  const wrongCode = () => (sent.at(-1)?.code === "000000" ? "000001" : "000000");
+  return { game, db, sent, logs, wait, ask, said, signUp, lastCode, wrongCode };
 }
 
+/** The reference as the player reads it, from a reply or from an error message. */
+function refIn(text: string): string {
+  return /reference: ([0-9A-Z]{6})/.exec(text)![1]!;
+}
+
+const mailDown = async () => {
+  throw new Error("mail is down");
+};
+
 describe("joining by email", () => {
-  test("a code is mailed and confirming it joins the lobby", async () => {
-    const { game, sent } = setup();
-    const reply = await game.requestJoin("t1", "Ana", 25, " Ana@Example.org ");
+  test("a code is mailed, the reply carries a reference, and confirming the code joins the lobby", async () => {
+    const { game, sent, ask } = setup();
+    const reply = await ask("t1", "Ana", " Ana@Example.org ", 25);
     expect(reply.confirmation_sent).toBe(true);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.to).toBe("ana@example.org");
-    expect(sent[0]!.code).toMatch(/^\d{6}$/);
+    expect(reply.request_ref).toMatch(REF);
+    expect(reply.note).toContain(`reference: ${reply.request_ref}`);
+    expect(sent).toEqual([{ to: "ana@example.org", code: expect.stringMatching(/^\d{6}$/) }]);
     expect(game.status("t1").you).toBeNull();
-    expect(game.confirm("t1", sent[0]!.code)).toMatchObject({ joined_as: "Ana", your_budget: 25 });
+    expect(game.confirm("t1", sent[0]!.code)).toMatchObject({ joined_as: "Ana", your_budget: 25, players: 1 });
     expect(game.status("t1").you).toBe("Ana");
     expect(() => game.confirm("t1", sent[0]!.code)).toThrow(/no code waiting/);
   });
 
-  test("plain join is refused, and input is checked before any mail goes out", async () => {
-    const { game, sent } = setup({ inviteCode: "elf" });
-    expect(() => game.join("t1", "Ana", 20, "elf")).toThrow(/email/);
+  test("input is checked before anything is saved or sent", async () => {
+    const { game, sent, ask } = setup();
+    expect(() => game.join("t1", "Ana", 20, INVITE)).toThrow(/email/);
     await expect(game.requestJoin("t1", "Ana", 20, "a@b.co")).rejects.toThrow(/invite/);
-    await expect(game.requestJoin("t1", "Ana", 20, "not-an-address", "elf")).rejects.toThrow(/email address/);
-    await expect(game.requestJoin("t1", "Ana", 5, "a@b.co", "elf")).rejects.toThrow(/at least 20/);
-    await expect(game.requestJoin("t1", "<b>", 20, "a@b.co", "elf")).rejects.toThrow(/letters/);
-    expect(sent).toHaveLength(0);
+    await expect(game.requestJoin("t1", "Ana", 20, "a@b.co", "elf-invitE")).rejects.toThrow(/invite/);
+    await expect(ask("t1", "Ana", "a@b.co", 5)).rejects.toThrow(/at least 20/);
+    await expect(ask("t1", "<b>", "a@b.co")).rejects.toThrow(/letters/);
+    const badAddresses = [
+      "not-an-address",
+      "a@b",
+      "a b@example.org",
+      "a\tb@example.org",
+      "x\x1b[1A\x1b[2K@a.bc", // terminal escape: would erase a line on the host's screen
+      "a​b@example.org", // zero-width space
+      "a‮b@example.org", // right-to-left override
+      "аna@example.org", // Cyrillic letter that looks like a Latin one
+      "a$(id)@example.org", // shell syntax: the host may paste an address into a command
+      "a`id`@example.org",
+      "a;b@example.org",
+      "a|b@example.org",
+      "a&b@example.org",
+      "o'brien@example.org",
+      '"a"@example.org',
+      "a@@example.org",
+      "--all@example.org", // would read as an option of the host's command
+      "-x@example.org",
+      "a@example.org\n",
+    ];
+    for (const bad of badAddresses.slice(0, -1)) await expect(ask("t1", "Ana", bad)).rejects.toThrow(/email address/);
+    expect((await ask("t1", "Ana", badAddresses.at(-1)!)).confirmation_sent).toBe(true); // surrounding whitespace is trimmed
+    expect(sent).toHaveLength(1);
+    expect(game.adminPending().requests.map((r) => r.email)).toEqual(["a@example.org"]);
   });
 
-  test("the code works only for the token that asked, has five tries and expires", async () => {
-    const { game, sent, wait } = setup();
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
-    const code = sent[0]!.code;
-    const wrong = code === "000000" ? "000001" : "000000";
+  test("with email confirmation and no invite code, joining is off", async () => {
+    const { game, sent } = setup({ inviteCode: undefined });
+    expect(game.joinBlocked).toMatch(/invite code/);
+    await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(/switched off/);
+    await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org", "")).rejects.toThrow(/switched off/);
+    expect(sent).toHaveLength(0);
+    expect(setup().game.joinBlocked).toBeNull();
+  });
+
+  test("the code works only for the installation that asked, has five tries and expires", async () => {
+    const { game, ask, lastCode, wrongCode, wait } = setup();
+    await ask("t1", "Ana", "ana@example.org");
+    const code = lastCode();
     expect(() => game.confirm("other-token", code)).toThrow(/no code waiting/);
     expect(() => game.confirm("t1", "12345")).toThrow(/six digits/);
-    for (let i = 4; i >= 0; i--) expect(() => game.confirm("t1", wrong)).toThrow(`${i} tries left`);
+    // The tries are counted although confirm runs in a transaction that an error would roll back.
+    for (let left = 4; left >= 0; left--) expect(() => game.confirm("t1", wrongCode())).toThrow(`${left} tries left`);
     expect(() => game.confirm("t1", code)).toThrow(/no longer valid/);
 
     wait(61_000);
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
+    await ask("t1", "Ana", "ana@example.org");
     wait(15 * 60_000 + 1);
-    expect(() => game.confirm("t1", sent[1]!.code)).toThrow(/no longer valid/);
+    expect(() => game.confirm("t1", lastCode())).toThrow(/no longer valid/);
   });
 
   test("codes keep leading zeros", async () => {
-    const { game, sent } = setup({ rand: () => 42 });
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
+    const { game, sent, ask } = setup({ rand: (n) => (n === 1_000_000 ? 42 : 0) });
+    await ask("t1", "Ana", "ana@example.org");
     expect(sent[0]!.code).toBe("000042");
     expect(game.confirm("t1", "000042").joined_as).toBe("Ana");
   });
 
-  test("limits: one mail a minute and five a day per address, and a daily total", async () => {
-    const { game, sent, wait } = setup({ mailDailyCap: 7 });
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
-    await expect(game.requestJoin("t2", "Ana2", 20, "ana@example.org")).rejects.toThrow(/less than a minute/);
+  test("the limits stop mail, never the request: one a minute and five a day per address, and a daily total", async () => {
+    const { game, sent, ask, said, wait } = setup({ mailDailyCap: 7 });
+    await ask("t1", "Ana", "ana@example.org");
+    const cooled = await said("t2", "Ana2", "ana@example.org");
+    expect(cooled).toMatch(/^error: A code was sent to this address less than a minute ago.*Your request is saved.*reference: [0-9A-Z]{6}$/);
     for (let i = 0; i < 4; i++) {
       wait(61_000);
-      await game.requestJoin("t1", "Ana", 20, "ana@example.org");
+      await ask("t1", "Ana", "ana@example.org");
     }
     wait(61_000);
-    await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(/Too many codes/);
-    await game.requestJoin("t3", "Bo", 20, "bo@example.org");
-    await game.requestJoin("t4", "Cy", 20, "cy@example.org");
-    await expect(game.requestJoin("t5", "Di", 20, "di@example.org")).rejects.toThrow(/email limit for today/);
+    expect(await said("t1", "Ana", "ana@example.org")).toMatch(/^error: Too many codes.*Your request is saved/);
+    await ask("t3", "Bo", "bo@example.org");
+    await ask("t4", "Cy", "cy@example.org");
+    expect(await said("t5", "Di", "di@example.org")).toMatch(/^error: The server reached its email limit.*Your request is saved/);
     expect(sent).toHaveLength(7);
+    // Every one of them is on the host's list, mailed or not.
+    expect(game.adminPending().requests.map((r) => r.email)).toEqual([
+      "ana@example.org",
+      "ana@example.org",
+      "bo@example.org",
+      "cy@example.org",
+      "di@example.org",
+    ]);
     wait(24 * 3600_000);
-    await game.requestJoin("t5", "Di", 20, "di@example.org");
+    await ask("t5", "Di", "di@example.org");
     expect(sent).toHaveLength(8);
   });
 
-  test("one address is one player; confirming again from a new token moves the player", async () => {
-    const { game, sent, signUp, wait } = setup({ minPlayers: 3 });
-    await signUp("t1", "Ana", "ana@example.org");
-    await signUp("t2", "Bo", "bo@example.org");
-    await signUp("t3", "Cy", "cy@example.org");
-    game.draw();
-    const before = game.myAssignment("t1");
-
-    // Lost token after the draw: same address, new installation, different name typed.
-    wait(61_000);
-    const reply = await game.requestJoin("t1-new", "Somebody Else", 99, "ana@example.org");
-    expect(game.confirm("t1-new", sent.at(-1)!.code).joined_as).toBe("Ana");
-    expect(game.myAssignment("t1-new")).toEqual(before);
-    expect(() => game.myAssignment("t1")).toThrow(/not joined/);
-    expect(game.adminStatus().players).toEqual(["Ana", "Bo", "Cy"]);
-
-    // After the draw an unknown address gets the same reply, no mail, and cannot get in.
-    const mails = sent.length;
-    expect(await game.requestJoin("t9", "Late", 20, "late@example.org")).toEqual(reply);
-    expect(sent).toHaveLength(mails);
-    expect(() => game.adminConfirm("late@example.org")).toThrow(/No pending/);
-    expect(game.adminPending()).toEqual([]);
+  test("a retry refused by a limit keeps the mailed code, and does not hand out fresh tries", async () => {
+    const { game, ask, said, lastCode, wrongCode } = setup();
+    const first = await ask("t1", "Ana", "ana@example.org");
+    const code = lastCode();
+    expect(() => game.confirm("t1", wrongCode())).toThrow("4 tries left");
+    expect(() => game.confirm("t1", wrongCode())).toThrow("3 tries left");
+    // Asking again inside the minute sends nothing. The reference and the code stay as they were.
+    expect(refIn(await said("t1", "Ana", "ana@example.org"))).toBe(first.request_ref);
+    expect(() => game.confirm("t1", wrongCode())).toThrow("2 tries left");
+    expect(game.confirm("t1", code).joined_as).toBe("Ana");
   });
 
-  test("a taken name is refused at confirmation and nothing is half-created", async () => {
-    const { game, sent, signUp, wait } = setup();
-    await signUp("t1", "Ana", "ana@example.org");
-    await game.requestJoin("t2", "ana", 20, "other@example.org");
-    expect(() => game.confirm("t2", sent.at(-1)!.code)).toThrow(/taken/);
-    wait(61_000);
-    await game.requestJoin("t2", "Ana B", 20, "other@example.org");
-    expect(game.confirm("t2", sent.at(-1)!.code).joined_as).toBe("Ana B");
+  test("a code mailed to one address cannot confirm another", async () => {
+    const { game, ask, said, lastCode } = setup();
+    const first = await ask("t1", "Ana", "ana@example.org");
+    const codeForAna = lastCode();
+    // Bo's address is inside its cooldown, so when t1 switches to it no new code goes out.
+    await ask("t2", "Bo", "bo@example.org");
+    const switched = await said("t1", "Ana", "bo@example.org");
+    expect(switched).toMatch(/less than a minute ago/);
+    expect(refIn(switched)).not.toBe(first.request_ref);
+    expect(() => game.confirm("t1", codeForAna)).toThrow(/no longer valid/);
+    expect(game.status("t1").you).toBeNull();
+    // The other way round as well: with no limit in the way, the new address gets a new code.
+    const { game: g2, ask: ask2, lastCode: last2 } = setup();
+    await ask2("t1", "Ana", "ana@example.org");
+    const old = last2();
+    await ask2("t1", "Ana", "ana2@example.org");
+    if (last2() !== old) expect(() => g2.confirm("t1", old)).toThrow(/Wrong code/);
   });
 
-  test("mail failures give the player a plain message and log only codes", async () => {
+  test("when mail is down, every request is still saved for the host, whatever the daily cap", async () => {
+    const { game, said, wait, logs } = setup({ mailDailyCap: 3, mailer: mailDown });
+    const texts: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      texts.push(await said(`t${i}`, `P${i}`, `p${i}@example.org`));
+      wait(1000);
+    }
+    expect(texts.slice(0, 3).every((x) => /could not be sent.*Your request is saved.*reference: /.test(x))).toBe(true);
+    expect(texts.slice(3).every((x) => /email limit for today.*Your request is saved.*reference: /.test(x))).toBe(true);
+    expect(game.adminPending().requests).toHaveLength(5);
+    expect(game.adminConfirm("p4@example.org", refIn(texts[4]!))).toBe("P4");
+    expect(logs.join()).not.toMatch(/example|P\d/);
+    expect(logs.filter((l) => /^mail failed \d+\/(\d+|-)$/.test(l))).toHaveLength(3);
+  });
+
+  test("mail failures give the player a plain message with the reference", async () => {
     for (const [err, msg] of [
-      [new MailError(403, 10208), /verified addresses.*saved/],
-      [new MailError(429, 10004), /limit is reached/],
-      [new Error("boom"), /could not be sent/],
+      [new MailError(403, 10208), /verified addresses.*saved.*reference: [0-9A-Z]{6}$/],
+      [new MailError(429, 10004), /limit is reached.*saved.*reference: [0-9A-Z]{6}$/],
+      [new Error("boom"), /could not be sent.*saved.*reference: [0-9A-Z]{6}$/],
     ] as const) {
-      const { game, logs } = setup({
+      const { ask } = setup({
         mailer: async () => {
           throw err;
         },
       });
-      await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(msg);
-      expect(game.adminPending().map((r) => r.email)).toEqual(["ana@example.org"]);
-      expect(game.adminConfirm("ana@example.org")).toBe("Ana");
-      expect(logs.join()).not.toMatch(/ana|example/i);
-      expect(logs[0]).toMatch(/^mail failed \d+\/(\d+|-)$/);
+      await expect(ask("t1", "Ana", "ana@example.org")).rejects.toThrow(msg);
     }
   });
 
-  test("the host can list pending addresses and confirm one by hand", async () => {
-    const { game } = setup();
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
-    expect(game.adminPending()).toEqual([{ email: "ana@example.org", requested_name: "Ana", minutes_ago: 0, note: "" }]);
-    expect(game.adminConfirm("ANA@example.org")).toBe("Ana");
-    expect(game.adminPending()).toEqual([]);
-    expect(() => game.adminConfirm("nobody@example.org")).toThrow(/No pending/);
+  test("the number of waiting requests is capped, and an installation that already waits can still update", async () => {
+    const { game, ask, said, wait } = setup({ maxPending: 2 });
+    await ask("t1", "Ana", "ana@example.org");
+    await ask("t2", "Bo", "bo@example.org");
+    expect(await said("t3", "Cy", "cy@example.org")).toMatch(/Too many join requests are waiting/);
+    wait(61_000);
+    expect((await ask("t1", "Ana Maria", "ana@example.org")).confirmation_sent).toBe(true);
+    expect(game.adminPending().requests.map((r) => r.requested_name)).toEqual(["Ana Maria", "Bo"]);
+    expect(game.adminReject(null)).toBe(2);
+    expect((await ask("t3", "Cy", "cy@example.org")).confirmation_sent).toBe(true);
   });
 
-  test("hand-confirming cannot quietly give a player to another installation", async () => {
-    const { game, signUp, wait } = setup({ minPlayers: 3 });
+  test("a taken name is refused at confirmation and nothing is half-created", async () => {
+    const { game, ask, signUp, lastCode, wait } = setup();
+    await signUp("t1", "Ana", "ana@example.org");
+    await ask("t2", "ana", "other@example.org");
+    expect(() => game.confirm("t2", lastCode())).toThrow(/taken/);
+    expect(game.adminStatus().players).toEqual(["Ana"]);
+    wait(61_000);
+    await ask("t2", "Ana B", "other@example.org");
+    expect(game.confirm("t2", lastCode()).joined_as).toBe("Ana B");
+  });
+
+  test("one address is one player; a new installation with the same address takes the player over", async () => {
+    const { game, ask, signUp, lastCode, wait } = setup({ minPlayers: 3 });
     await signUp("a", "Ana", "ana@example.org");
     await signUp("b", "Bo", "bo@example.org");
     await signUp("c", "Cy", "cy@example.org");
     game.draw();
     const anaGives = game.myAssignment("a");
-
-    // Someone with the invite code files a request under Ana's address. They never see the code.
+    // Lost token after the draw: same address, new installation, another name typed.
     wait(61_000);
-    await game.requestJoin("intruder", "Whoever", 20, "ana@example.org");
-    expect(game.adminPending()[0]!.note).toMatch(/already plays as Ana/);
-    expect(() => game.adminConfirm("ana@example.org")).toThrow(/already plays as Ana.*--rebind/s);
-
-    // Ana, who really lost her token, asks within the same minute. The limit refuses her and saves no request,
-    // but her attempt is counted, so the address is contested and --rebind is refused too.
-    await expect(game.requestJoin("a-new", "Ana", 20, "ana@example.org")).rejects.toThrow(/less than a minute/);
-    expect(game.adminPending()).toHaveLength(1);
-    expect(game.adminPending()[0]!.note).toMatch(/2 installations asked.*already plays as Ana/);
-    expect(() => game.adminConfirm("ana@example.org", { rebind: true })).toThrow(/2 different installations/);
-    expect(() => game.myAssignment("intruder")).toThrow(/not joined/);
-    expect(game.myAssignment("a")).toEqual(anaGives);
-
-    // Reject clears the requests and the mail limits, so Ana can ask again at once.
-    game.adminReject("ANA@example.org");
-    expect(game.adminPending()).toEqual([]);
-    expect(() => game.adminReject("ana@exmaple.org")).toThrow(/Nothing is pending/);
-    await game.requestJoin("a-new", "Ana", 20, "ana@example.org");
-    expect(game.adminConfirm("ana@example.org", { rebind: true })).toBe("Ana");
+    await ask("a-new", "Somebody Else", "ana@example.org", 99);
+    expect(game.confirm("a-new", lastCode()).joined_as).toBe("Ana");
     expect(game.myAssignment("a-new")).toEqual(anaGives);
     expect(() => game.myAssignment("a")).toThrow(/not joined/);
+    expect(game.adminStatus().players).toEqual(["Ana", "Bo", "Cy"]);
+  });
+});
+
+describe("confirming by hand", () => {
+  test("needs the address and the reference, which only the requester is shown", async () => {
+    const { game, said } = setup({ mailer: mailDown });
+    const ref = refIn(await said("t1", "Ana", "ana@example.org"));
+    const list = game.adminPending();
+    expect(list).toEqual({ requests: [{ email: "ana@example.org", requested_name: "Ana", minutes_ago: 0, note: "" }], too_late: 0 });
+    expect(JSON.stringify(list)).not.toContain(ref);
+    expect(JSON.stringify(game.adminStatus())).not.toContain(ref);
+
+    const other = ref.startsWith("Z") ? `Y${ref.slice(1)}` : `Z${ref.slice(1)}`;
+    expect(() => game.adminConfirm("ana@example.org", other)).toThrow(/No pending request matches/);
+    expect(() => game.adminConfirm("bo@example.org", ref)).toThrow(/No pending request matches/);
+    expect(() => game.adminConfirm("ana@example.org", "K7Q4")).toThrow(/six letters and digits/);
+    expect(() => game.adminConfirm("ana@example.org", "")).toThrow(/six letters and digits/);
+    expect(game.status("t1").you).toBeNull();
+    expect(game.adminConfirm(" ANA@example.org ", ref)).toBe("Ana");
+    expect(game.adminPending().requests).toEqual([]);
+    expect(() => game.adminConfirm("ana@example.org", ref)).toThrow(/No pending request matches/);
   });
 
-  test("reject also lifts the per-address daily limit", async () => {
-    const { game, wait } = setup({
-      mailer: async () => {
-        throw new Error("mail is down");
-      },
-    });
-    for (let i = 0; i < 5; i++) {
-      await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(/saved/);
-      wait(61_000);
-    }
-    await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(/Too many codes/);
-    expect(game.adminConfirm("ana@example.org")).toBe("Ana"); // the earlier request is still there
-    await expect(game.requestJoin("t2", "Bo", 20, "bo@example.org")).rejects.toThrow(/saved/);
-    game.adminReject("bo@example.org");
-    await expect(game.requestJoin("t2", "Bo", 20, "bo@example.org")).rejects.toThrow(/saved/);
+  test("the reference survives being read out: case, dashes, and O, I, L for 0, 1, 1", async () => {
+    const digits = [0, 1, 0, 1, 10, 11]; // "0101AB"
+    const { game, ask } = setup({ rand: (n) => (n === 32 ? digits.shift()! : 7) });
+    const reply = await ask("t1", "Ana", "ana@example.org");
+    expect(reply.request_ref).toBe("0101AB");
+    expect(game.adminConfirm("ana@example.org", " oIo-L ab ")).toBe("Ana");
   });
 
-  test("a dead code leaves the request for the host", async () => {
-    const { game, sent, wait } = setup();
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
-    wait(20 * 60_000);
-    expect(() => game.confirm("t1", sent[0]!.code)).toThrow(/no longer valid/);
-    expect(() => game.confirm("t1", sent[0]!.code)).toThrow(/no longer valid/);
-    expect(game.adminPending().map((r) => [r.email, r.minutes_ago])).toEqual([["ana@example.org", 20]]);
-    expect(game.adminConfirm("ana@example.org")).toBe("Ana");
+  test("a request filed by someone else under a player's address cannot be confirmed", async () => {
+    const { game, ask, said, signUp, wait } = setup({ minPlayers: 3 });
+    await signUp("a", "Ana", "ana@example.org");
+    await signUp("b", "Bo", "bo@example.org");
+    await signUp("c", "Cy", "cy@example.org");
+    game.draw();
+    const anaGives = game.myAssignment("a");
+    wait(61_000);
+
+    // Someone with the invite code asks under Ana's address. Only they see their reference.
+    const intruderRef = (await ask("intruder", "Ana", "ana@example.org")).request_ref;
+    // Ana, who really lost her token, asks inside the same minute. No mail goes out, but she is recorded.
+    const anaRef = refIn(await said("a-new", "Ana", "ana@example.org"));
+    expect(anaRef).not.toBe(intruderRef);
+    const { requests } = game.adminPending();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.note).toMatch(/2 installations asked.*already plays as Ana.*--rebind/);
+
+    // The host has Ana's reference, from Ana. Without --rebind nothing moves.
+    expect(() => game.adminConfirm("ana@example.org", anaRef)).toThrow(/already plays as Ana.*--rebind/s);
+    expect(game.myAssignment("a")).toEqual(anaGives);
+    expect(game.adminConfirm("ana@example.org", anaRef, { rebind: true })).toBe("Ana");
+    expect(game.myAssignment("a-new")).toEqual(anaGives);
+    expect(() => game.myAssignment("intruder")).toThrow(/not joined/);
+    expect(() => game.myAssignment("a")).toThrow(/not joined/);
+    // Both requests for the address are gone, the intruder's too.
+    expect(game.adminPending().requests).toEqual([]);
   });
 
-  test("addresses with control or invisible characters are refused", async () => {
-    const { game, sent } = setup();
-    for (const bad of ["x\x1b[1A\x1b[2K@a.bc", "a\u200bb@example.org", "a\u202eb@example.org", "a b@example.org", "a\tb@example.org"]) {
-      await expect(game.requestJoin("t1", "Ana", 20, bad)).rejects.toThrow(/email address/);
-    }
-    expect(sent).toHaveLength(0);
-    expect(game.adminPending()).toEqual([]);
-  });
-
-  test("after the draw, replies do not show whether an address plays", async () => {
-    let fail = false;
-    const { game, signUp, wait } = setup({
-      minPlayers: 3,
-      mailer: async () => {
-        if (fail) throw new Error("mail is down");
-      },
-    });
-    // signUp reads the code from `sent`, which this mailer does not fill: confirm by hand instead.
-    for (const [t, n] of [["a", "Ana"], ["b", "Bo"], ["c", "Cy"]] as const) {
-      await game.requestJoin(t, n, 20, `${n.toLowerCase()}@example.org`);
-      game.adminConfirm(`${n.toLowerCase()}@example.org`);
-    }
-    void signUp;
+  test("if the owner's request was never recorded, the other one still cannot be confirmed", async () => {
+    const { game, ask, said, signUp, wait } = setup({ minPlayers: 3 });
+    await signUp("a", "Ana", "ana@example.org");
+    await signUp("b", "Bo", "bo@example.org");
+    await signUp("c", "Cy", "cy@example.org");
     game.draw();
     wait(61_000);
-    const outcome = async (email: string) => {
-      const run = async () => game.requestJoin(`probe-${email}-${Math.random()}`, "P", 20, email).then(JSON.stringify, (e) => `error: ${e.message}`);
-      return [await run(), await run()]; // second call lands inside the cooldown
-    };
-    expect(await outcome("ana@example.org")).toEqual(await outcome("nobody@example.org"));
-    fail = true;
+    await ask("intruder", "Ana", "ana@example.org");
+    // Ana's own request is refused for a reason that has nothing to do with the address. She gets no reference.
+    const anaSaw = await said("a-new", "Ana", "ana@example.org", 5);
+    expect(anaSaw).toMatch(/at least 20/);
+    expect(anaSaw).not.toMatch(/reference/);
+    // The host sees one request for her address, and has nothing from Ana to type. Guessing does not help.
+    expect(game.adminPending().requests).toHaveLength(1);
+    for (const guess of ["000000", "ZZZZZZ", "K7Q42M"]) {
+      expect(() => game.adminConfirm("ana@example.org", guess, { rebind: true })).toThrow(/No pending request matches/);
+    }
+    expect(() => game.myAssignment("intruder")).toThrow(/not joined/);
+  });
+
+  test("a request that changes its address gets a new reference, so an approval cannot be redirected", async () => {
+    const { game, ask, signUp, wait } = setup();
+    await signUp("b", "Bo", "bo@example.org");
+    const own = (await ask("t", "Tom", "tom@example.org")).request_ref; // Tom gives the host this, honestly
     wait(61_000);
-    expect(await outcome("bo@example.org")).toEqual(await outcome("nobody2@example.org"));
+    const moved = (await ask("t", "Tom", "bo@example.org")).request_ref; // then points the request at Bo's address
+    expect(moved).not.toBe(own);
+    expect(() => game.adminConfirm("tom@example.org", own)).toThrow(/No pending request matches/);
+    expect(() => game.adminConfirm("bo@example.org", own, { rebind: true })).toThrow(/No pending request matches/);
+    expect(game.status("b").you).toBe("Bo");
+    expect(game.status("t").you).toBeNull();
   });
 
-  test("old pending requests are cleaned up", async () => {
-    const { game, wait } = setup();
-    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
+  test("reject clears an address's requests and its mail limits; --all clears everything", async () => {
+    const { game, sent, ask, said } = setup();
+    await ask("t1", "Ana", "ana@example.org");
+    expect(await said("t1", "Ana", "ana@example.org")).toMatch(/less than a minute/);
+    expect(() => game.adminReject("ana@exmaple.org")).toThrow(/Nothing is pending/);
+    expect(game.adminReject(" ANA@example.org ")).toBe(1);
+    expect(game.adminPending().requests).toEqual([]);
+    expect((await ask("t1", "Ana", "ana@example.org")).confirmation_sent).toBe(true); // at once: the cooldown went too
+    expect(sent).toHaveLength(2);
+    await ask("t2", "Bo", "bo@example.org");
+    expect(game.adminReject(null)).toBe(2);
+    expect(game.adminReject(null)).toBe(0);
+  });
+
+  test("a request outlives its code and stays for seven days; the host commands tidy up by themselves", async () => {
+    const { game, ask, lastCode, wait } = setup();
+    const ref = (await ask("t1", "Ana", "ana@example.org")).request_ref;
+    wait(20 * 60_000);
+    expect(() => game.confirm("t1", lastCode())).toThrow(/no longer valid/);
+    expect(game.adminPending().requests.map((r) => [r.email, r.minutes_ago])).toEqual([["ana@example.org", 20]]);
     wait(6 * 24 * 3600_000);
-    expect(game.adminPending()).toHaveLength(1);
+    expect(game.adminPending().requests).toHaveLength(1);
     wait(2 * 24 * 3600_000);
-    // No new join request is needed for the cleanup: the host commands do it too.
-    expect(game.adminPending()).toEqual([]);
-    expect(() => game.adminConfirm("ana@example.org")).toThrow(/No pending/);
+    expect(game.adminPending().requests).toEqual([]);
+    expect(() => game.adminConfirm("ana@example.org", ref)).toThrow(/No pending request matches/);
+    // Asking again brings it back, with a new reference.
+    expect((await ask("t1", "Ana", "ana@example.org")).request_ref).not.toBe(ref);
+  });
+});
+
+describe("after the draw", () => {
+  async function drawn(opts: GameOptions = {}) {
+    const s = setup({ minPlayers: 3, rand: (n) => (n === 1_000_000 ? 123456 : Math.floor(Math.random() * n)), ...opts });
+    // Confirmed by hand, so this works whatever the mailer of the test does.
+    for (const [t, n] of [["a", "Ana"], ["b", "Bo"], ["c", "Cy"]] as const) {
+      const ref = refIn(await s.said(t, n, `${n.toLowerCase()}@example.org`));
+      s.game.adminConfirm(`${n.toLowerCase()}@example.org`, ref);
+    }
+    s.game.draw();
+    s.wait(24 * 3600_000);
+    return s;
+  }
+  const blank = (text: string) => text.replace(/(reference: |"request_ref":")[0-9A-Z]{6}/g, "$1REF");
+
+  /** Everything a caller can see when asking for an address and then trying codes. */
+  async function transcript(s: Awaited<ReturnType<typeof drawn>>, email: string): Promise<string[]> {
+    const tok = `probe ${email}`;
+    const out: string[] = [];
+    const tryCode = () => {
+      try {
+        out.push(JSON.stringify(s.game.confirm(tok, "000000")));
+      } catch (e) {
+        out.push(`error: ${(e as Error).message}`);
+      }
+    };
+    out.push(await s.said(tok, "Probe", email));
+    out.push(await s.said(tok, "Probe", email)); // inside the cooldown
+    for (let i = 0; i < 6; i++) tryCode();
+    s.wait(61_000);
+    out.push(await s.said(tok, "Probe", email));
+    tryCode();
+    s.wait(16 * 60_000);
+    tryCode();
+    for (let i = 0; i < 5; i++) {
+      out.push(await s.said(tok, "Probe", email)); // runs into the per-address limit
+      s.wait(61_000);
+    }
+    return out.map(blank);
+  }
+
+  test("nothing a caller sees depends on whether the address plays", async () => {
+    for (const mailer of [undefined, mailDown]) {
+      const s = await drawn(mailer ? { mailer } : {});
+      const plays = await transcript(s, "ana@example.org");
+      const unknown = await transcript(s, "nobody@example.org");
+      expect(plays).toEqual(unknown);
+      // The transcript really went through every kind of answer.
+      const all = plays.join("\n");
+      for (const part of ["confirmation_sent", "less than a minute", "4 tries left", "0 tries left", "no longer valid", "Too many codes"]) {
+        expect(all).toContain(part);
+      }
+    }
   });
 
-  test("no player-facing output contains an email address", async () => {
-    const { game, signUp } = setup({ minPlayers: 3 });
+  test("the reply does not wait for the mail, so its speed says nothing either; in the lobby it does wait", async () => {
+    let release = () => {};
+    let hang = false;
+    // Sends at once until told to hang; then a mail stays in flight until release() is called.
+    const never = () => (hang ? new Promise<void>((resolve) => (release = resolve)) : Promise.resolve());
+    const s = await drawn({ mailer: never });
+    hang = true;
+    const settled = async (p: Promise<unknown>) => {
+      let done = false;
+      void p.then(
+        () => (done = true),
+        () => (done = true),
+      );
+      await new Promise((r) => setTimeout(r, 15));
+      return done;
+    };
+    expect(await settled(s.ask("x", "X", "ana@example.org"))).toBe(true); // plays: mail goes out behind the reply
+    expect(await settled(s.ask("y", "Y", "nobody@example.org"))).toBe(true);
+    release();
+
+    const lobby = setup({ mailer: never });
+    const pending = lobby.ask("t1", "Ana", "ana@example.org");
+    expect(await settled(pending)).toBe(false);
+    release();
+    expect((await pending).confirmation_sent).toBe(true);
+  });
+
+  test("a mail failure behind the reply is logged and nothing else", async () => {
+    const s = await drawn({ mailer: mailDown });
+    s.logs.length = 0;
+    expect((await s.ask("x", "X", "ana@example.org")).confirmation_sent).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(s.logs).toEqual(["mail failed 0/-"]);
+    // A mailer that throws before returning a promise is handled the same way.
+    const t = await drawn({
+      mailer: (() => {
+        throw new MailError(500, 10002);
+      }) as never,
+    });
+    t.logs.length = 0;
+    expect((await t.ask("x", "X", "bo@example.org")).confirmation_sent).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(t.logs).toEqual(["mail failed 500/10002"]);
+  });
+
+  test("a late request cannot join, is kept off the host's list, and is only counted", async () => {
+    const s = await drawn();
+    const ref = (await s.ask("late", "Late", "late@example.org")).request_ref;
+    expect(s.sent.filter((m) => m.to === "late@example.org")).toEqual([]);
+    expect(s.game.adminPending()).toEqual({ requests: [], too_late: 1 });
+    expect(s.game.adminStatus().pending_confirmations).toBe(0);
+    expect(() => s.game.adminConfirm("late@example.org", ref)).toThrow(/Joining is closed/);
+    expect(s.game.adminStatus().players).toEqual(["Ana", "Bo", "Cy"]);
+  });
+
+  test("a request left over from the lobby cannot slip in after the draw", async () => {
+    const s = setup({ minPlayers: 3 });
+    await s.signUp("a", "Ana", "ana@example.org");
+    await s.signUp("b", "Bo", "bo@example.org");
+    await s.signUp("c", "Cy", "cy@example.org");
+    const ref = (await s.ask("d", "Di", "di@example.org")).request_ref;
+    const code = s.lastCode();
+    s.game.draw();
+    expect(() => s.game.confirm("d", code)).toThrow(/Joining is closed/);
+    expect(() => s.game.adminConfirm("di@example.org", ref)).toThrow(/Joining is closed/);
+    expect(s.game.adminPending()).toEqual({ requests: [], too_late: 1 });
+    expect(s.game.adminStatus().players).toEqual(["Ana", "Bo", "Cy"]);
+  });
+});
+
+describe("privacy", () => {
+  test("no player-facing output contains an email address or a reference", async () => {
+    const { game, ask, signUp } = setup({ minPlayers: 3 });
     await signUp("t1", "Ana", "ana@example.org");
     await signUp("t2", "Bo", "bo@example.org");
     await signUp("t3", "Cy", "cy@example.org");
+    const ref = (await ask("t4", "Di", "di@example.org")).request_ref;
     game.draw();
     game.postHint("t1", "It hums.");
     game.ask("t1", "Tea?");
     game.openReveal();
-    const out = [game.status("t2"), game.inbox("t2"), game.feed("t2", "today"), game.reveal("t2"), game.adminStatus()];
-    expect(JSON.stringify(out)).not.toContain("@");
+    const out = JSON.stringify([game.status("t2"), game.inbox("t2"), game.feed("t2", "today"), game.reveal("t2"), game.status("t4")]);
+    expect(out).not.toContain("@");
+    expect(out).not.toContain(ref);
+    expect(JSON.stringify(game.adminStatus())).not.toContain("@");
+  });
+
+  test("someone who has not joined sees how many play, not who", async () => {
+    const { game, signUp } = setup();
+    await signUp("t1", "Ana", "ana@example.org");
+    await signUp("t2", "Bo", "bo@example.org");
+    const outside = game.status("some-new-token");
+    expect(outside).toEqual({ phase: "lobby", player_count: 2, you: null, your_budget: null, min_budget: 20, currency: "EUR" });
+    expect(JSON.stringify(outside)).not.toMatch(/Ana|Bo/);
+    expect(game.status("t1")).toMatchObject({ you: "Ana", players: ["Ana", "Bo"], player_count: 2 });
   });
 });
 
-test("a database from before email confirmation is upgraded in place", () => {
-  const db = new Database(":memory:");
-  db.exec(`CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
-           token_hash TEXT NOT NULL UNIQUE, budget REAL NOT NULL);
-           INSERT INTO players (name, name_key, token_hash, budget) VALUES ('Old', 'old', 'old-token', 20);`);
-  const game = new Game(db);
-  expect(game.status("old-token").you).toBe("Old");
-  expect(game.join("t2", "New", 20).joined_as).toBe("New");
-  new Game(db); // opening twice is fine
+describe("databases made by earlier versions", () => {
+  test("from before email confirmation", () => {
+    const db = new Database(":memory:");
+    db.exec(`CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+             token_hash TEXT NOT NULL UNIQUE, budget REAL NOT NULL);
+             INSERT INTO players (name, name_key, token_hash, budget) VALUES ('Old', 'old', 'old-token', 20);`);
+    const game = new Game(db);
+    expect(game.status("old-token").you).toBe("Old");
+    expect(game.join("t2", "New", 20).joined_as).toBe("New");
+    new Game(db); // opening twice is fine
+  });
+
+  test("from the version that confirmed by address alone", async () => {
+    const db = new Database(":memory:");
+    const t0 = Date.parse("2026-12-01T10:00:00Z");
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO meta VALUES ('phase', 'lobby');
+      CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL UNIQUE, budget REAL NOT NULL, email TEXT);
+      CREATE UNIQUE INDEX players_email ON players(email) WHERE email IS NOT NULL;
+      INSERT INTO players (name, name_key, token_hash, budget, email) VALUES ('MAZA', 'maza', 'maza-token', 30, 'maza@example.org');
+      CREATE TABLE registrations (token_hash TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, budget REAL NOT NULL,
+        code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO registrations VALUES ('waiting-token', 'ana@example.org', 'Ana', 25, 'abc', ${t0 + 15 * 60_000}, 0);
+      CREATE TABLE mail_log (email TEXT NOT NULL, sent_at INTEGER NOT NULL);
+      INSERT INTO mail_log VALUES ('ana@example.org', ${t0});
+      CREATE TABLE join_attempts (email TEXT NOT NULL, token_hash TEXT NOT NULL, at INTEGER NOT NULL);
+      INSERT INTO join_attempts VALUES ('ana@example.org', 'waiting-token', ${t0});
+    `);
+    let t = t0 + 5 * 60_000;
+    const sent: string[] = [];
+    const open = () => new Game(db, { now: () => new Date(t), inviteCode: INVITE, mailer: async (_to, code) => void sent.push(code) });
+    const game = open();
+    open(); // a second start changes nothing more
+
+    expect(game.status("maza-token")).toMatchObject({ you: "MAZA", your_budget: 30 });
+    expect(db.query("SELECT name FROM sqlite_master WHERE name = 'join_attempts'").get()).toBeNull();
+    // The request that was waiting is still there, five minutes old, and now has a reference.
+    expect(game.adminPending().requests).toEqual([{ email: "ana@example.org", requested_name: "Ana", minutes_ago: 5, note: "" }]);
+    const row = db.query("SELECT ref FROM registrations").get() as { ref: string };
+    expect(row.ref).toMatch(REF);
+    // The player learns it by asking again; the same address keeps the same reference.
+    const reply = await game.requestJoin("waiting-token", "Ana", 25, "ana@example.org", INVITE);
+    expect(reply.request_ref).toBe(row.ref);
+    expect(game.adminConfirm("ana@example.org", reply.request_ref)).toBe("Ana");
+    // The player from before is still tied to their address: a new installation takes them over, it does not add a second player.
+    t += 61_000;
+    await game.requestJoin("maza-new", "Whatever", 20, "maza@example.org", INVITE);
+    expect(game.confirm("maza-new", sent.at(-1)!).joined_as).toBe("MAZA");
+    expect(game.adminStatus().players).toEqual(["Ana", "MAZA"]);
+  });
 });
 
 describe("Cloudflare mail request", () => {

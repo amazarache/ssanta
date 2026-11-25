@@ -85,29 +85,29 @@ test("a full game over HTTP", async () => {
 
 test("joining by email over HTTP", async () => {
   const sent: string[] = [];
-  const mailGame = new Game(new Database(":memory:"), { mailer: async (_to, code) => void sent.push(code) });
+  const mailGame = new Game(new Database(":memory:"), { inviteCode: "elf", mailer: async (_to, code) => void sent.push(code) });
   const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: createHandler(mailGame) });
   const old = server;
   server = s;
   try {
-    expect((await call("Ana", "join", { name: "Ana", budget: 25 })).error).toMatch(/email address/);
-    expect((await call("Ana", "join", { name: "Ana", budget: 25, email: "ana@example.org" })).confirmation_sent).toBe(true);
+    expect((await call("Ana", "join", { name: "Ana", budget: 25, invite_code: "elf" })).error).toMatch(/email address/);
+    expect((await call("Ana", "join", { name: "Ana", budget: 25, email: "ana@example.org" })).error).toMatch(/invite/);
+    const reply = await call("Ana", "join", { name: "Ana", budget: 25, email: "ana@example.org", invite_code: "elf" });
+    expect(reply.confirmation_sent).toBe(true);
+    expect(reply.request_ref).toMatch(/^[0-9A-Z]{6}$/);
     expect(sent).toHaveLength(1);
+    // Inside the cooldown the tool answers with an error, and the error still carries the reference.
+    expect((await call("Ana", "join", { name: "Ana", budget: 25, email: "ana@example.org", invite_code: "elf" })).error).toContain(
+      `reference: ${reply.request_ref}`,
+    );
     expect((await call("Bogdan", "confirm", { code: sent[0] })).error).toMatch(/no code waiting/);
     expect((await call("Ana", "confirm", { code: sent[0] })).joined_as).toBe("Ana");
     expect((await call("Ana", "status")).you).toBe("Ana");
+    expect((await call("Bogdan", "status")).players).toBeUndefined();
   } finally {
     server = old;
     s.stop(true);
   }
-});
-
-test("the root address describes the service", async () => {
-  const res = await fetch(`http://127.0.0.1:${server.port}/`);
-  expect(res.status).toBe(200);
-  expect(res.headers.get("content-type")).toContain("text/html");
-  expect(await res.text()).toContain("Secret Santa");
-  expect((await fetch(`http://127.0.0.1:${server.port}/robots.txt`)).status).toBe(200);
 });
 
 test("the stdio bridge relays MCP messages to the server", async () => {

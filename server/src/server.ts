@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { dbPath, gameOptions } from "./config.ts";
 import { openDb } from "./db.ts";
 import { Game, GameError, LIMITS } from "./game.ts";
 import { cloudflareMailer } from "./mail.ts";
@@ -48,7 +49,7 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
   tool(
     "join",
     game.emailMode
-      ? "Ask to join the game: display name, budget for the gift you give, and your email address. A six-digit code is mailed to that address; finish with the confirm tool."
+      ? "Ask to join the game: display name, budget for the gift you give, and your email address. A six-digit code is mailed to that address; finish with the confirm tool. The reply, also when it is an error, carries a request reference: show it to the owner exactly as written."
       : "Join the game under a display name, with your budget for the gift you give. Only possible before the draw.",
     {
       name: z.string().max(LIMITS.name),
@@ -73,7 +74,7 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
     { budget: z.number() },
     (a) => game.setBudget(tokenHash, a.budget),
   );
-  tool("status", "Game phase, list of players, your budget and the minimum, and what is waiting for you.", {}, () => game.status(tokenHash));
+  tool("status", "Game phase, who plays (once you have joined), your budget and the minimum, and what is waiting for you.", {}, () => game.status(tokenHash));
   tool("my_assignment", "The one person you give a gift to. Private to you.", {}, () => game.myAssignment(tokenHash));
   tool(
     "ask",
@@ -173,15 +174,8 @@ if (import.meta.main) {
   const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
   const { SANTA_MAIL_ACCOUNT_ID: accountId, SANTA_MAIL_TOKEN: mailToken, SANTA_MAIL_FROM: from } = process.env;
   const mailer = accountId && mailToken && from ? cloudflareMailer({ accountId, token: mailToken, from }) : undefined;
-  const game = new Game(openDb(process.env.SANTA_DB ?? "data/santa.db"), {
-    mailer,
-    mailDailyCap: Number(process.env.SANTA_MAIL_DAILY_CAP ?? 300),
-    log,
-    inviteCode: process.env.SANTA_INVITE_CODE,
-    minBudget: Number(process.env.SANTA_MIN_BUDGET ?? 20),
-    currency: process.env.SANTA_CURRENCY ?? "EUR",
-    maxPlayers: Number(process.env.SANTA_MAX_PLAYERS ?? LIMITS.maxPlayers),
-  });
+  const game = new Game(openDb(dbPath()), { ...gameOptions(), mailer, log });
   Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log) });
   console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()}, email confirmation: ${game.emailMode ? "on" : "off"})`);
+  if (game.joinBlocked) console.log(`JOINING IS OFF: ${game.joinBlocked}. Set SANTA_INVITE_CODE and restart.`);
 }

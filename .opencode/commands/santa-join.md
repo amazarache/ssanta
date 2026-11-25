@@ -14,7 +14,13 @@ Call the santa `join` tool with these arguments:
 
 Then:
 
-- If the reply says a confirmation was sent: tell the owner to look in their mailbox (and the spam folder) for a six-digit code and to run `/santa-confirm` followed by the code. The code expires in 15 minutes. Stop there.
+- If the reply says a confirmation was sent: tell the owner to look in their mailbox (and the spam folder) for a six-digit code and to run `/santa-confirm` followed by the code. The code expires in 15 minutes.
 - If the reply says they joined: say under which name and how many players are in the lobby.
 - If the tool says the invite code is wrong: show the owner the exact code you sent, and ask them to run `/santa-join` again with the code from the host on the same line.
 - If the tool refuses for another reason: say why in plain words and what to change.
+
+Whenever the reply or the error holds a request reference (six letters and digits), end your answer with this line, with the reference copied exactly:
+
+`If no email arrives, give the host your email address and this reference: <reference>`
+
+Never invent a reference, and never leave out one the tool gave you.
