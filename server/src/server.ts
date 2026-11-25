@@ -1,0 +1,131 @@
+// MCP server over Streamable HTTP. Stateless: every request builds its own
+// McpServer bound to the caller's token hash, so a tool can only ever act as
+// the caller.
+
+import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { z } from "zod";
+import { Game, GameError, LIMITS } from "./game.ts";
+
+const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
+
+export function openDb(path: string): Database {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  return new Database(path);
+}
+
+function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): McpServer {
+  const mcp = new McpServer({ name: "secret-santa", version: "0.1.0" });
+
+  const tool = <S extends z.ZodRawShape>(
+    name: string,
+    description: string,
+    inputSchema: S,
+    run: (args: z.infer<z.ZodObject<S>>) => unknown,
+  ) => {
+    mcp.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>) => {
+      try {
+        const result = run(args);
+        log(`${name} ok`);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        if (err instanceof GameError) {
+          log(`${name} refused`);
+          return { isError: true, content: [{ type: "text" as const, text: err.message }] };
+        }
+        log(`${name} failed`);
+        console.error(err);
+        return { isError: true, content: [{ type: "text" as const, text: "Internal error." }] };
+      }
+    }) as never);
+  };
+
+  tool(
+    "join",
+    "Join the game under a display name. Only possible before the draw.",
+    { name: z.string().max(LIMITS.name), invite_code: z.string().max(64).optional() },
+    (a) => game.join(tokenHash, a.name, a.invite_code),
+  );
+  tool("status", "Game phase, list of players, and what is waiting for you.", {}, () => game.status(tokenHash));
+  tool("my_assignment", "The one person you give a gift to. Private to you.", {}, () => game.myAssignment(tokenHash));
+  tool(
+    "ask",
+    "Send one anonymous question to the agent of the person you give to. Limited number of questions.",
+    { question: z.string().max(LIMITS.question) },
+    (a) => game.ask(tokenHash, a.question),
+  );
+  tool(
+    "inbox",
+    "Anonymous questions waiting for your answer, and the replies to the questions you asked.",
+    {},
+    () => game.inbox(tokenHash),
+  );
+  tool(
+    "answer",
+    "Answer one question from your inbox. Your Santa's agent will read it.",
+    { question_id: z.number().int(), answer: z.string().max(LIMITS.answer) },
+    (a) => game.answer(tokenHash, a.question_id, a.answer),
+  );
+  tool(
+    "post_hint",
+    "Post one anonymous public hint about the gift you are giving. One per day.",
+    { hint: z.string().max(LIMITS.hint) },
+    (a) => game.postHint(tokenHash, a.hint),
+  );
+  tool("feed", "All public hints so far, labelled with who each hint is for.", {}, () => game.feed(tokenHash));
+  tool(
+    "guess",
+    "Record your guess of who your Santa is. Can be changed until the reveal.",
+    { name: z.string().max(LIMITS.name) },
+    (a) => game.guess(tokenHash, a.name),
+  );
+  tool("reveal", "After the organiser opens the reveal: who gave to whom and who guessed right.", {}, () =>
+    game.reveal(tokenHash),
+  );
+  return mcp;
+}
+
+export function createHandler(game: Game, log: (line: string) => void = () => {}) {
+  return async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    if (url.pathname === "/healthz") return new Response("ok\n");
+    if (url.pathname !== "/mcp") return new Response("Not found\n", { status: 404 });
+    if (req.method !== "POST") {
+      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "POST" } });
+    }
+    const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+    if (!TOKEN_RE.test(token)) {
+      return new Response("Send your player token as 'Authorization: Bearer <token>' (32 to 128 URL-safe characters).\n", {
+        status: 401,
+      });
+    }
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    const mcp = buildMcp(game, tokenHash, log);
+    await mcp.connect(transport);
+    try {
+      return await transport.handleRequest(req);
+    } finally {
+      queueMicrotask(() => void mcp.close());
+    }
+  };
+}
+
+if (import.meta.main) {
+  const port = Number(process.env.SANTA_PORT ?? 8787);
+  const hostname = process.env.SANTA_HOST ?? "127.0.0.1";
+  const game = new Game(openDb(process.env.SANTA_DB ?? "data/santa.db"), {
+    inviteCode: process.env.SANTA_INVITE_CODE,
+  });
+  // Log lines carry the tool name and outcome only: no names, no text, no tokens.
+  const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+  Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log) });
+  console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()})`);
+}
