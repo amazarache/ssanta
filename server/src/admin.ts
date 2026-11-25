@@ -2,7 +2,7 @@
 // Nothing here prints who gives to whom.
 
 import { Game, GameError } from "./game.ts";
-import { openDb } from "./server.ts";
+import { openDb } from "./db.ts";
 
 const game = new Game(openDb(process.env.SANTA_DB ?? "data/santa.db"));
 const cmd = process.argv[2];

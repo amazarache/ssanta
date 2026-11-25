@@ -45,6 +45,21 @@ bun run admin draw     # once, when everyone has joined (4 players or more)
 bun run admin reveal   # on the day
 ```
 
+### On Kubernetes
+
+`deploy/` holds a kustomize setup: the server is bundled into one file, mounted from a ConfigMap into the stock Bun image, with a 1Gi volume for the database and an ingress.
+
+```sh
+deploy/build.sh                                   # bundle server and admin into deploy/dist
+kubectl create namespace santa
+kubectl -n santa create secret generic santa-invite --from-literal=code=pick-one   # optional
+kubectl apply --server-side -k deploy/            # --server-side is needed: the bundle is too big for client-side apply
+kubectl -n santa exec deploy/santa -- bun /app/admin.js status   # also: draw, reveal, remove NAME
+kubectl -n santa get secret santa-invite -o jsonpath='{.data.code}' | base64 -d   # read the invite code
+```
+
+Change the host name in `deploy/santa.yaml`, the storage class if you do not run Longhorn, and the budget settings in `deploy/kustomization.yaml`.
+
 Server settings (environment variables):
 
 | Variable | Default | Meaning |

@@ -16,13 +16,22 @@ bun run start                     # MCP server on 127.0.0.1:8787/mcp
 bun run admin status|draw|reveal|remove NAME  # organiser commands
 ```
 
+Deploy (from the repository root; the live game runs in namespace `santa` on the k3s cluster, at `http://santa.k3s.home/mcp`):
+
+```sh
+deploy/build.sh && kubectl apply --server-side -k deploy/
+kubectl -n santa exec deploy/santa -- bun /app/admin.js status
+```
+
+The deployment mounts the bundled `server.js` from a generated ConfigMap, so there is no image to build or push. Never delete the `santa-data` volume or run `admin draw` on the live game without the owner asking: both are irreversible for the players.
+
 To try the player side against a local server: start the server, then in the repository root run `/santa-setup` in opencode, `opencode reload`, and `/santa-join`. `opencode mcp list` shows whether the `santa` server is connected; it reports HTTP 401 until `.santa-token` exists and the config is reloaded.
 
 ## Architecture
 
 The team's only shared tool is opencode, so the game has two halves and no chat platform.
 
-- **Server (`server/src`).** Holds all state and enforces the rules. It has no model. `game.ts` is the rules as a plain class over SQLite, with no HTTP in it. `server.ts` exposes eleven player tools over MCP Streamable HTTP, stateless: each request builds an `McpServer` bound to the SHA-256 hash of the caller's bearer token, so a tool can only act as the caller. `admin.ts` is the organiser's CLI; the draw and the reveal are deliberately not tools.
+- **Server (`server/src`).** Holds all state and enforces the rules. It has no model. `game.ts` is the rules as a plain class over SQLite, with no HTTP in it. `server.ts` exposes eleven player tools over MCP Streamable HTTP, stateless: each request builds an `McpServer` bound to the SHA-256 hash of the caller's bearer token, so a tool can only act as the caller. `db.ts` opens the database for both entry points (kept separate so bundling `admin.ts` does not start a server). `admin.ts` is the organiser's CLI; the draw and the reveal are deliberately not tools.
 - **Client pack (repository root).** `opencode.json` points opencode at the server: the address comes from `santa-server.txt` (committed, set by the organiser) and the token from `.santa-token` (per player, never committed). `.opencode/agents/elf.md` is the player's agent. `.opencode/commands/santa-*.md` are the player's actions. All writing (questions, answers, hints, guesses) is done by the player's own model; the server only relays and limits.
 
 Nobody is always online and the server cannot push, so everything is a mailbox: `/santa-checkin` pulls questions, answers them from `vibe.md`, and reads replies and the hint feed. The game is sized for about 100 players (tested with 100; `SANTA_MAX_PLAYERS` defaults to 200), which is why `feed` returns only the caller's hints unless asked for today's, and `join` returns a count instead of the roster. Phases go `lobby` → `playing` → `revealed` and never back.
@@ -63,6 +72,6 @@ Ideas that were considered and left out of the first version: a gift tag written
 
 ## Open decisions
 
-- Where the server runs so that every player can reach it, and its public address.
+- How players outside the home network reach the server: `santa.k3s.home` resolves only on the LAN and is plain HTTP.
 - Whether remote players need shipped or digital gifts.
 - Whether to encrypt assignments at rest so the organiser cannot read them.

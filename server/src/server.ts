@@ -2,21 +2,14 @@
 // McpServer bound to the caller's token hash, so a tool can only ever act as
 // the caller.
 
-import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { openDb } from "./db.ts";
 import { Game, GameError, LIMITS } from "./game.ts";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
-
-export function openDb(path: string): Database {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  return new Database(path);
-}
 
 function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): McpServer {
   const mcp = new McpServer({ name: "secret-santa", version: "0.1.0" });
