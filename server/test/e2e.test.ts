@@ -163,7 +163,7 @@ test("the server hands every client its rules and a prompt for each step, with o
     await withClient(token, async (c) => {
       expect(c.getInstructions()).toBe(INSTRUCTIONS);
       const { prompts } = await c.listPrompts();
-      expect(prompts.map((p) => p.name)).toEqual(["join", "confirm", "checkin", "ask", "ideas", "hint", "guess", "budget", "reveal"]);
+      expect(prompts.map((p) => p.name)).toEqual(["join", "confirm", "checkin", "ask", "ideas", "hint", "guess", "budget", "page", "reveal"]);
       expect(prompts.find((p) => p.name === "join")!.arguments).toEqual([
         { name: "invite_code", description: "The invite code from the host", required: false },
       ]);
@@ -212,6 +212,6 @@ test("the stdio bridge passes the instructions and the prompts through", async (
   proc.stdin.end();
   const replies = (await new Response(proc.stdout).text()).trim().split("\n").map((l) => JSON.parse(l));
   expect(replies[0].result.instructions).toBe(INSTRUCTIONS);
-  expect(replies[1].result.prompts).toHaveLength(9);
+  expect(replies[1].result.prompts).toHaveLength(10);
   expect(replies[2].result.messages[0].content.text).toContain("`status`");
 });

@@ -15,6 +15,8 @@ configMapGenerator:
       - SANTA_MAX_PLAYERS=200
       - SANTA_MAIL_DAILY_CAP=300
       # Dates shown on the public board, as YYYY-MM-DD. Leave empty until they are decided.
+      # The address players reach the server at. Switches on the players' own page (/me).
+      - SANTA_PUBLIC_URL=https://santa.mazarache.org
       - SANTA_JOIN_BY=
       - SANTA_DRAW_ON=
       - SANTA_REVEAL_ON=

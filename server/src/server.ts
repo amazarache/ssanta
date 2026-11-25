@@ -7,9 +7,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { BOARD_REFRESH_MS, type BoardCounts, type BoardSettings, renderBoard } from "./board.ts";
-import { boardSettings, dbPath, gameOptions } from "./config.ts";
+import { boardSettings, dbPath, gameOptions, publicUrl } from "./config.ts";
 import { openDb } from "./db.ts";
-import { Game, GameError, LIMITS } from "./game.ts";
+import { Game, GameError, LIMITS, PAGE_TICKET_PREFIX } from "./game.ts";
+import { renderClosed, renderGate, renderMe } from "./me.ts";
 import { cloudflareMailer } from "./mail.ts";
 import { INSTRUCTIONS, PROMPTS } from "./prompts.ts";
 
@@ -31,10 +32,25 @@ function carriesToken(text: string, token: string | null): boolean {
   return bare(token).length >= 16 && bare(text).includes(bare(token));
 }
 
-function buildMcp(game: Game, caller: string | null, log: (line: string) => void, token: string | null = null): McpServer {
+/** True if the text holds a link ticket for a player's page, whatever is wedged between its characters. */
+function carriesPageTicket(text: string): boolean {
+  const squeezed = text.replace(/[\s\-_.,:;|/\\]/g, "");
+  return new RegExp(`${PAGE_TICKET_PREFIX.replace(/_/g, "")}[0-9a-f]{16}`, "i").test(squeezed);
+}
+
+function buildMcp(
+  game: Game,
+  caller: string | null,
+  log: (line: string) => void,
+  token: string | null = null,
+  pageBase: string | undefined = undefined,
+): McpServer {
   const relayed = (text: string): string => {
     if (carriesToken(text, token)) {
       throw new GameError("That text contains your player token. A token must never be sent to other players. Nothing was sent.", "token_in_text");
+    }
+    if (carriesPageTicket(text)) {
+      throw new GameError("That text contains a link to a player's page. Such a link is for its owner only. Nothing was sent.", "link_in_text");
     }
     return text;
   };
@@ -139,6 +155,16 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
     { name: z.string().max(LIMITS.name) },
     (a) => game.guess(tokenHash, a.name),
   );
+  tool(
+    "my_page",
+    "A link to the owner's own web page: the hints about their gift, their guess, and after the reveal the table. The link is for the owner only, works once and expires in ten minutes. Give it to the owner exactly as returned. Never put it in a question, an answer or a hint.",
+    {},
+    () => {
+      if (!pageBase) throw new GameError("The host has not switched the players' page on.", "no_page");
+      const ticket = game.issuePageTicket(tokenHash);
+      return { link: `${pageBase}/me?t=${ticket}`, note: "For the owner only. It works once, within ten minutes. Opening it shows a button; the page opens when the owner presses it." };
+    },
+  );
   tool("reveal", "After the organiser opens the reveal: who gave to whom and who guessed right.", {}, () =>
     game.reveal(tokenHash),
   );
@@ -170,6 +196,8 @@ const LANDING = `<!doctype html>
 export interface HandlerOptions {
   /** Settings for the public board. Without them the board is not served. */
   board?: BoardSettings;
+  /** The server's public https address. Without it there is no player page and no link to one. */
+  publicUrl?: string;
   now?: () => Date;
 }
 
@@ -191,9 +219,62 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       },
     });
   };
+  // A player's own page. Everything under /me is private: never cached, never indexed, no referrer.
+  const COOKIE = "__Host-santa";
+  const privatePage = (html: string, status = 200, extra: Record<string, string> = {}): Response =>
+    new Response(html, {
+      status,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex, nofollow",
+        ...extra,
+      },
+    });
+  const sessionOf = (req: Request): string | null => {
+    for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+      const [name, ...value] = part.trim().split("=");
+      if (name === COOKIE) return value.join("=");
+    }
+    return null;
+  };
+  const me = async (req: Request, url: URL, settings: BoardSettings): Promise<Response> => {
+    if (url.pathname === "/me/leave" && req.method === "POST") {
+      return privatePage("", 303, { Location: "/board", "Set-Cookie": `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` });
+    }
+    if (url.pathname !== "/me") return privatePage(renderClosed("none"), 404);
+    if (req.method === "POST") {
+      // The only step that uses up a link. A program that merely fetches the link, such as a web filter
+      // or a chat preview, gets the button below and uses nothing up.
+      let ticket = "";
+      try {
+        ticket = new URLSearchParams(await req.text()).get("t") ?? "";
+      } catch {}
+      const redeemed = game.redeemPageTicket(ticket);
+      log(`page open ${redeemed ? "ok" : "refused"}`);
+      if (!redeemed) return privatePage(renderClosed("bad-link"), 403);
+      return privatePage("", 303, {
+        Location: "/me",
+        "Set-Cookie": `${COOKIE}=${redeemed.session}; Path=/; Max-Age=${redeemed.maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`,
+      });
+    }
+    if (req.method !== "GET") return privatePage(renderClosed("none"), 405, { Allow: "GET, POST" });
+    const ticket = url.searchParams.get("t");
+    if (ticket) return privatePage(renderGate(ticket.slice(0, 80)));
+    const session = game.pageSession(sessionOf(req));
+    const data = session && game.playerPage(session.id);
+    if (!session || !data) return privatePage(renderClosed("none"), 401);
+    return privatePage(renderMe(data, settings, now(), session.expires));
+  };
+
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok\n");
+    if ((url.pathname === "/me" || url.pathname.startsWith("/me/")) && opts.publicUrl && opts.board) return me(req, url, opts.board);
     if (url.pathname === "/board" && req.method === "GET" && opts.board) return board(opts.board);
     if (url.pathname === "/" && req.method === "GET") {
       return new Response(LANDING, { headers: { "Content-Type": "text/html; charset=utf-8" } });
@@ -209,7 +290,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    const mcp = buildMcp(game, tokenHash, log, tokenHash ? token : null);
+    const mcp = buildMcp(game, tokenHash, log, tokenHash ? token : null, opts.publicUrl);
     await mcp.connect(transport);
     try {
       return await transport.handleRequest(req);
@@ -227,7 +308,7 @@ if (import.meta.main) {
   const { SANTA_MAIL_ACCOUNT_ID: accountId, SANTA_MAIL_TOKEN: mailToken, SANTA_MAIL_FROM: from } = process.env;
   const mailer = accountId && mailToken && from ? cloudflareMailer({ accountId, token: mailToken, from }) : undefined;
   const game = new Game(openDb(dbPath()), { ...gameOptions(), mailer, log });
-  Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log, { board: boardSettings() }) });
+  Bun.serve({ port, hostname, maxRequestBodySize: 64 * 1024, fetch: createHandler(game, log, { board: boardSettings(), publicUrl: publicUrl() }) });
   console.log(`Secret Santa MCP server on http://${hostname}:${port}/mcp (phase: ${game.phase()}, email confirmation: ${game.emailMode ? "on" : "off"})`);
   if (game.joinBlocked) console.log(`JOINING IS OFF: ${game.joinBlocked}. Set SANTA_INVITE_CODE and restart.`);
 }

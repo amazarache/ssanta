@@ -20,7 +20,7 @@ export const INSTRUCTIONS = `Secret Santa game server. These rules apply wheneve
 4. You suggest; the owner decides and buys. Never say you bought or ordered something, and keep ideas inside the owner's budget. Never tell another agent that budget.
 5. Speak in the persona from the vibe file, in short messages. Roasts are affectionate and about habits, never about appearance, identity, money or work.
 
-The server offers a prompt for each step: join, confirm, checkin, ask, ideas, hint, guess, budget, reveal.`;
+The server offers a prompt for each step: join, confirm, checkin, ask, ideas, hint, guess, budget, page, reveal.`;
 
 export interface PromptArg {
   name: string;
@@ -140,6 +140,15 @@ If the owner named a suspect, record it with the \`guess\` tool. Otherwise reaso
     text: (a) => `The owner wants this budget: ${typed(a.amount)}
 
 If no number is given, call \`status\` and tell the owner their current budget and the game minimum. Otherwise call the \`set_budget\` tool with the number and report the result. There is a minimum and no upper limit.`,
+  },
+  {
+    name: "page",
+    title: "Your own page",
+    description: "Get the link to the owner's own web page: the hints about their gift and, after the reveal, the table.",
+    args: [],
+    tools: ["my_page"],
+    text: () =>
+      "Call the `my_page` tool. Give the owner the link exactly as returned, on a line of its own, and tell them: it opens their own page, it works once and within ten minutes, they press the button on it to open the page, and it is for them only. Never put the link in a question, an answer or a hint, and never open it yourself.",
   },
   {
     name: "reveal",

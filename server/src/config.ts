@@ -34,6 +34,16 @@ export function boardSettings(env: Env = process.env): BoardSettings {
   };
 }
 
+/** The address players reach the server at. The link to a player's page is built from it, never from a request. */
+export function publicUrl(env: Env = process.env): string | undefined {
+  const raw = env.SANTA_PUBLIC_URL?.trim().replace(/\/+$/, "");
+  if (!raw) return undefined;
+  if (!/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(raw)) {
+    throw new Error(`SANTA_PUBLIC_URL must look like https://santa.example.org, with no path. It is set to "${raw}".`);
+  }
+  return raw;
+}
+
 export function dbPath(env: Env = process.env): string {
   return env.SANTA_DB || "data/santa.db";
 }

@@ -64,6 +64,11 @@ const EMAIL_RE = /^[a-z0-9][a-z0-9._%+-]*@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 const REF_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const REF_LENGTH = 6;
 const REF_RE = /^[0-9A-HJKMNP-TV-Z]{6}$/;
+// The link to a player's own page works once, and not for long. Its ticket starts with a fixed prefix
+// so the server can recognise one in text that is about to be relayed to other players, and refuse it.
+export const PAGE_TICKET_PREFIX = "spg_";
+const PAGE_TICKET_TTL_MS = 10 * 60 * 1000;
+const PAGE_SESSION_TTL_MS = 8 * 3600 * 1000;
 
 export const LIMITS = {
   minPlayers: 4,
@@ -152,6 +157,8 @@ export class Game {
   private log: (line: string) => void;
   /** Key for address fingerprints. Lives in the database, so it protects against reading, not against guessing. */
   private emailKey = "";
+  /** Key that signs the cookie of a player's page. Separate from the address key. */
+  private pageKey = "";
   private addressRemoved = false;
 
   constructor(
@@ -238,8 +245,16 @@ export class Game {
       );
       -- One row per decision to send a confirmation mail. Only used for the sending limits.
       CREATE TABLE IF NOT EXISTS mail_log (email_fp TEXT NOT NULL, sent_at INTEGER NOT NULL, failed INTEGER NOT NULL DEFAULT 0);
+      -- The one unused link to a player's page. Only a hash of its ticket is kept.
+      CREATE TABLE IF NOT EXISTS page_tickets (
+        player_id INTEGER PRIMARY KEY REFERENCES players(id),
+        ticket_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
+    db.query("INSERT OR IGNORE INTO meta (key, value) VALUES ('page_key', ?)").run(randomBytes(32).toString("hex"));
+    this.pageKey = (db.query("SELECT value FROM meta WHERE key = 'page_key'").get() as { value: string }).value;
     const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 
     // A player's address is kept as a keyed fingerprint only: enough to recognise the address when it comes
@@ -634,6 +649,7 @@ export class Game {
           throw new GameError("This installation already plays as someone else.", "already_joined");
         }
         this.db.query("UPDATE players SET token_hash = ? WHERE id = ?").run(tokenHash, existing.id);
+        this.db.query("DELETE FROM page_tickets WHERE player_id = ?").run(existing.id);
         this.dropRequests("WHERE email = ?", reg.email);
         return { joined_as: existing.name, note: "Welcome back. This installation now plays as you; the old one no longer does." };
       }
@@ -807,6 +823,110 @@ export class Game {
     };
   }
 
+  // ---- the player's own web page ----
+
+  /**
+   * A fresh ticket for the caller's page. It replaces any earlier unused one, works once and expires in
+   * ten minutes. Only its hash is stored. The caller must be a player.
+   */
+  issuePageTicket(tokenHash: string): string {
+    const me = this.player(tokenHash);
+    const ticket = PAGE_TICKET_PREFIX + randomBytes(16).toString("hex");
+    const hash = createHash("sha256").update(ticket).digest("hex");
+    this.db
+      .query(
+        `INSERT INTO page_tickets (player_id, ticket_hash, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(player_id) DO UPDATE SET ticket_hash = excluded.ticket_hash, expires_at = excluded.expires_at`,
+      )
+      .run(me.id, hash, this.now().getTime() + PAGE_TICKET_TTL_MS);
+    return ticket;
+  }
+
+  /** Trades a ticket for a session, once. Returns the cookie value and its lifetime, or null. */
+  redeemPageTicket(ticket: string): { session: string; maxAgeSeconds: number } | null {
+    if (typeof ticket !== "string" || !ticket.startsWith(PAGE_TICKET_PREFIX) || ticket.length > 80) return null;
+    const hash = createHash("sha256").update(ticket).digest("hex");
+    return this.tx(() => {
+      const now = this.now().getTime();
+      this.db.query("DELETE FROM page_tickets WHERE expires_at < ?").run(now);
+      const row = this.db.query("SELECT player_id FROM page_tickets WHERE ticket_hash = ?").get(hash) as { player_id: number } | null;
+      if (!row) return null;
+      this.db.query("DELETE FROM page_tickets WHERE player_id = ?").run(row.player_id);
+      const player = this.db.query("SELECT id, token_hash FROM players WHERE id = ?").get(row.player_id) as
+        | { id: number; token_hash: string }
+        | null;
+      if (!player) return null;
+      const expires = now + PAGE_SESSION_TTL_MS;
+      return { session: `${player.id}.${expires}.${this.signSession(player.id, expires, player.token_hash)}`, maxAgeSeconds: PAGE_SESSION_TTL_MS / 1000 };
+    });
+  }
+
+  /**
+   * The signature covers the player's current token hash. So a session ends by itself when the player is
+   * removed, or when they recover with a new installation: whoever held the old one is out.
+   */
+  private signSession(playerId: number, expires: number, tokenHash: string): string {
+    return createHmac("sha256", this.pageKey).update(`${playerId}.${expires}.${tokenHash}`).digest("hex");
+  }
+
+  /** The player a session cookie belongs to, or null if it is forged, expired or no longer theirs. */
+  pageSession(session: string | null | undefined): { id: number; name: string; expires: number } | null {
+    const m = /^(\d{1,12})\.(\d{10,16})\.([0-9a-f]{64})$/.exec(String(session ?? ""));
+    if (!m) return null;
+    const id = Number(m[1]);
+    const expires = Number(m[2]);
+    if (expires <= this.now().getTime()) return null;
+    const player = this.db.query("SELECT id, name, token_hash FROM players WHERE id = ?").get(id) as
+      | (Player & { token_hash: string })
+      | null;
+    if (!player) return null;
+    const expected = Buffer.from(this.signSession(id, expires, player.token_hash), "hex");
+    if (!timingSafeEqual(expected, Buffer.from(m[3]!, "hex"))) return null;
+    return { id: player.id, name: player.name, expires };
+  }
+
+  /**
+   * What a player's page shows. Deliberately little: anyone who gets hold of the link, or looks at the
+   * screen, sees all of it. So it never holds who the player gives to, the text of a question or an
+   * answer, a budget, an address or a reference. A hint carries its day and its text, never its author.
+   */
+  playerPage(playerId: number) {
+    const me = this.db.query("SELECT id, name FROM players WHERE id = ?").get(playerId) as Player | null;
+    if (!me) return null;
+    const phase = this.phase();
+    const base = { name: me.name, phase, players: this.names() };
+    if (phase === "lobby") return { ...base, hints: [], guess: null, open: null, reveal: null };
+    const hints = this.db.query("SELECT day, text FROM hints WHERE receiver_id = ? ORDER BY day, id").all(me.id) as { day: string; text: string }[];
+    const guess = this.db
+      .query("SELECT p.name FROM guesses g JOIN players p ON p.id = g.guessed_id WHERE g.receiver_id = ?")
+      .get(me.id) as { name: string } | null;
+    const open =
+      phase === "playing"
+        ? {
+            questions_waiting: this.count("SELECT COUNT(*) AS c FROM questions WHERE receiver_id = ? AND answer IS NULL", me.id),
+            questions_left: Math.max(0, this.maxQuestions - this.count("SELECT COUNT(*) AS c FROM questions WHERE giver_id = ?", me.id)),
+            hint_posted_today: this.count("SELECT COUNT(*) AS c FROM hints WHERE giver_id = ? AND day = ?", me.id, this.today()) > 0,
+          }
+        : null;
+    let reveal: { santa: string; guessed_right: boolean; pairs: { santa: string; receiver: string; guessed: string | null; right: boolean }[] } | null = null;
+    if (phase === "revealed") {
+      const pairs = this.db
+        .query(
+          `SELECT g.name AS santa, r.name AS receiver, gu.name AS guessed
+           FROM assignments a
+           JOIN players g ON g.id = a.giver_id
+           JOIN players r ON r.id = a.receiver_id
+           LEFT JOIN guesses x ON x.receiver_id = a.receiver_id
+           LEFT JOIN players gu ON gu.id = x.guessed_id
+           ORDER BY r.name_key`,
+        )
+        .all() as { santa: string; receiver: string; guessed: string | null }[];
+      const mine = pairs.find((p) => p.receiver === me.name)!;
+      reveal = { santa: mine.santa, guessed_right: mine.guessed === mine.santa, pairs: pairs.map((p) => ({ ...p, right: p.guessed === p.santa })) };
+    }
+    return { ...base, hints, guess: guess?.name ?? null, open, reveal };
+  }
+
   // ---- organiser actions (admin CLI only, never exposed as tools) ----
 
   /** Draws once. Returns only the number of players, never the mapping. */
@@ -936,8 +1056,10 @@ export class Game {
   removePlayer(name: string): void {
     this.tx(() => {
       if (this.phase() !== "lobby") throw new GameError("Players can only be removed before the draw.");
-      const res = this.db.query("DELETE FROM players WHERE name_key = ?").run(name.trim().toLowerCase());
-      if (res.changes !== 1) throw new GameError(`Nobody called ${name} has joined.`);
+      const gone = this.db.query("SELECT id FROM players WHERE name_key = ?").get(name.trim().toLowerCase()) as { id: number } | null;
+      if (!gone) throw new GameError(`Nobody called ${name} has joined.`);
+      this.db.query("DELETE FROM page_tickets WHERE player_id = ?").run(gone.id);
+      this.db.query("DELETE FROM players WHERE id = ?").run(gone.id);
     });
   }
 

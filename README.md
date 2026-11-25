@@ -71,7 +71,17 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | Once you have the gift | `/santa-hint a small cast-iron teapot` | Your agent turns your gift into one cryptic public hint. One per day. |
 | Any time | `/santa-guess` or `/santa-guess Bogdan` | Your agent works out who your Santa is from the hints. You can change the guess until the reveal. |
 | Any time | `/santa-budget` or `/santa-budget 45` | Shows or changes your budget. |
+| Any time | `/santa-page` | Gives you a link to your own web page: the hints about your gift, your guess, who plays, and after the reveal the table of who gave to whom. |
 | On reveal day | `/santa-reveal` | Who your Santa was, and who guessed right. |
+
+### Your own page
+
+`/santa-page` (or "give me my page" in another client) returns a link. Open it and press the button: the page opens in that browser and stays open for eight hours.
+
+- The link works once and only for ten minutes. Ask for a new one whenever you need it.
+- It is yours alone. Do not forward it; the server also refuses to send one to other players inside a question or a hint.
+- The page shows the hints about your gift, your guess and who plays. It does not show who you give to, any questions or answers, or your budget, so it is safe to have open on your screen.
+- It does not update by itself. Reload it to see new hints.
 
 ### Rules of the game
 
@@ -172,6 +182,10 @@ The game server already runs on the k3s cluster and is reachable at `https://san
 `https://santa.mazarache.org/board` is a page anyone can open to see how the game is going: the phase, the number of players, how many questions, hints and guesses there are, and the dates. It shows numbers only, never names, hints or gifts, and its numbers are renewed every five minutes. Share the link with the team.
 
 To put the three dates on it, set `SANTA_JOIN_BY`, `SANTA_DRAW_ON` and `SANTA_REVEAL_ON` in `deploy/kustomization.yaml` (written as `2026-12-18`) and apply as below.
+
+### The players' own page
+
+Each player can ask their agent for a link to a page of their own (see the player guide). It is switched on by `SANTA_PUBLIC_URL` in `deploy/kustomization.yaml`, which must be the https address players use; links are built from it. Nothing else is needed from you. If a player's link was used or is too old, they ask their agent for a new one.
 
 ### Changing the settings
 
@@ -285,6 +299,7 @@ The server does not limit how often it is called. If you expose it to the intern
 | `SANTA_MAIL_ACCOUNT_ID`, `SANTA_MAIL_TOKEN`, `SANTA_MAIL_FROM` | none | Cloudflare account ID, API token and sender address. All three switch email confirmation on. |
 | `SANTA_MAIL_DAILY_CAP` | `300` | Most confirmation emails per day. |
 | `SANTA_JOIN_BY`, `SANTA_DRAW_ON`, `SANTA_REVEAL_ON` | none | Dates shown on the public board, as `YYYY-MM-DD`. |
+| `SANTA_PUBLIC_URL` | none | The https address players reach the server at, for example `https://santa.example.org`. Switches on the players' own page. |
 | `SANTA_HOST`, `SANTA_PORT` | `127.0.0.1`, `8787` | Where the server listens. |
 | `SANTA_DB` | `data/santa.db` | The game's database file. |
 

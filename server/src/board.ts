@@ -27,7 +27,7 @@ export interface BoardSettings {
 
 export const BOARD_REFRESH_MS = 5 * 60 * 1000;
 
-const esc = (text: string | number) =>
+export const esc = (text: string | number) =>
   String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -52,47 +52,8 @@ const PHASES: { key: Phase; label: string; line: string }[] = [
   { key: "revealed", label: "Revealed", line: "The reveal is open. Every player can see who their Santa was." },
 ];
 
-export function renderBoard(c: BoardCounts, s: BoardSettings, now: Date): string {
-  const at = PHASES.findIndex((p) => p.key === c.phase);
-  const steps = PHASES.map((p, i) => {
-    const state = i < at ? "done" : i === at ? "now" : "next";
-    return `<li class="${state}"${i === at ? ' aria-current="step"' : ""}><span class="dot"></span>${esc(p.label)}</li>`;
-  }).join("");
-
-  const tile = (value: string | number, label: string, note = "") =>
-    `<div class="tile"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div>${note ? `<div class="note">${esc(note)}</div>` : ""}</div>`;
-  const tiles = [
-    tile(c.players, c.players === 1 ? "player" : "players"),
-    ...(c.phase === "lobby"
-      ? []
-      : [
-          tile(c.questions, "questions asked", c.questions ? `${c.answers} answered` : ""),
-          tile(c.hints, "hints posted"),
-          tile(c.guesses, "guesses made", c.players ? `of ${c.players} players` : ""),
-        ]),
-  ].join("");
-
-  const dates = [
-    { label: "Join by", iso: s.joinBy },
-    { label: "The draw", iso: s.drawOn },
-    { label: "The reveal", iso: s.revealOn },
-  ].filter((d): d is { label: string; iso: string } => Boolean(d.iso));
-  const dateRows = dates.length
-    ? `<table>${dates.map((d) => `<tr><th scope="row">${esc(d.label)}</th><td>${esc(longDate(d.iso))}</td><td class="away">${esc(daysAway(d.iso, now))}</td></tr>`).join("")}</table>`
-    : `<p class="quiet">The host has not announced the dates yet.</p>`;
-
-  const stamp = now.toISOString().slice(11, 16);
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="${BOARD_REFRESH_MS / 1000}">
-<title>Santa's Agents: the board</title>
-<meta name="description" content="How a team Secret Santa played by AI agents is going: the phase, the dates and how busy the agents are. No names and no gifts are shown.">
-<meta name="robots" content="noindex">
-<style>
-  :root { --bg: #f7f4ee; --ink: #1d2a24; --quiet: #5f6b64; --card: #ffffff; --line: #e2dccf; --pine: #1f5c43; --berry: #b3262e; }
+/** The shared look of the server's pages. No script, nothing loaded from elsewhere. */
+export const PAGE_STYLE = `  :root { --bg: #f7f4ee; --ink: #1d2a24; --quiet: #5f6b64; --card: #ffffff; --line: #e2dccf; --pine: #1f5c43; --berry: #b3262e; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #111815; --ink: #ece7dc; --quiet: #9aa69f; --card: #1a2420; --line: #2b3832; --pine: #6fc39b; --berry: #f0787d; }
   }
@@ -119,7 +80,64 @@ export function renderBoard(c: BoardCounts, s: BoardSettings, now: Date): string
   th { font-weight: 600; white-space: nowrap; } .away { text-align: right; color: var(--berry); font-weight: 600; white-space: nowrap; }
   footer { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
   a { color: var(--pine); }
-</style>
+`;
+
+/** The three phases as a row of steps, with the current one marked. */
+export function phaseSteps(phase: Phase): string {
+  const at = PHASES.findIndex((p) => p.key === phase);
+  return PHASES.map((p, i) => {
+    const state = i < at ? "done" : i === at ? "now" : "next";
+    return `<li class="${state}"${i === at ? ' aria-current="step"' : ""}><span class="dot"></span>${esc(p.label)}</li>`;
+  }).join("");
+}
+
+export function phaseLine(phase: Phase): string {
+  return PHASES.find((p) => p.key === phase)!.line;
+}
+
+/** The host's dates as a table, or a line saying they are not announced. */
+export function dateTable(s: BoardSettings, now: Date): string {
+  const dates = [
+    { label: "Join by", iso: s.joinBy },
+    { label: "The draw", iso: s.drawOn },
+    { label: "The reveal", iso: s.revealOn },
+  ].filter((d): d is { label: string; iso: string } => Boolean(d.iso));
+  return dates.length
+    ? `<table>${dates.map((d) => `<tr><th scope="row">${esc(d.label)}</th><td>${esc(longDate(d.iso))}</td><td class="away">${esc(daysAway(d.iso, now))}</td></tr>`).join("")}</table>`
+    : `<p class="quiet">The host has not announced the dates yet.</p>`;
+}
+
+export function renderBoard(c: BoardCounts, s: BoardSettings, now: Date): string {
+  const at = PHASES.findIndex((p) => p.key === c.phase);
+  const steps = phaseSteps(c.phase);
+
+  const tile = (value: string | number, label: string, note = "") =>
+    `<div class="tile"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div>${note ? `<div class="note">${esc(note)}</div>` : ""}</div>`;
+  const tiles = [
+    tile(c.players, c.players === 1 ? "player" : "players"),
+    ...(c.phase === "lobby"
+      ? []
+      : [
+          tile(c.questions, "questions asked", c.questions ? `${c.answers} answered` : ""),
+          tile(c.hints, "hints posted"),
+          tile(c.guesses, "guesses made", c.players ? `of ${c.players} players` : ""),
+        ]),
+  ].join("");
+
+  const dateRows = dateTable(s, now);
+
+  const stamp = now.toISOString().slice(11, 16);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="${BOARD_REFRESH_MS / 1000}">
+<title>Santa's Agents: the board</title>
+<meta name="description" content="How a team Secret Santa played by AI agents is going: the phase, the dates and how busy the agents are. No names and no gifts are shown.">
+<meta name="robots" content="noindex">
+<style>
+${PAGE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -138,6 +156,7 @@ ${dateRows}
 
 <h2>Good to know</h2>
 <p class="quiet">Every player sets their own budget, from ${esc(s.minBudget)} ${esc(s.currency)} upwards. This page shows numbers only: no names, no hints and no gifts. It is renewed every five minutes; these numbers are from ${esc(stamp)} UTC.</p>
+<p class="quiet">Playing? Ask your agent for your own page: it shows the hints about your gift.</p>
 
 <footer><a href="/">What this server is</a> · <a href="https://github.com/amazarache/ssanta">How to play</a></footer>
 </main>
