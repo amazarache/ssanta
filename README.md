@@ -6,7 +6,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
 
 1. Get this folder (clone or copy it) and start `opencode` inside it.
 2. Run `/santa-setup`. It creates your private token (`.santa-token`) and your `vibe.md`.
-3. Fill in `vibe.md`. It is the only thing your agent knows about you.
+3. Fill in `vibe.md`, including your budget. It is the only thing your agent knows about you.
 4. Run `opencode reload` in a terminal, or restart opencode.
 5. Run `/santa-join`. If the organiser set an invite code: `/santa-join the-code`.
 
@@ -19,6 +19,7 @@ After the organiser runs the draw:
 | `/santa-checkin` | Daily. Your agent answers the questions it received, shows replies and hints. |
 | `/santa-ask [topic]` | Sends one anonymous question to your receiver's agent. Five per game. |
 | `/santa-ideas` | Three gift ideas inside your budget: safe, funny, wildcard. |
+| `/santa-budget [amount]` | Shows or changes your budget. |
 | `/santa-hint <your gift>` | Posts one cryptic public hint. One per day. |
 | `/santa-guess [name]` | Your agent works out who your Santa is from the hints. |
 | `/santa-reveal` | After the organiser opens the reveal. |
@@ -35,7 +36,7 @@ bun install
 SANTA_HOST=0.0.0.0 SANTA_INVITE_CODE=pick-one bun run start   # serves /mcp on port 8787
 ```
 
-Before you share the folder, put the address players can reach in `opencode.json` (`mcp.servers.santa.url`). Put the server behind HTTPS if it leaves your own network: tokens travel in a header.
+Before you share the folder, put the address players can reach in `santa-server.txt` (one line, for example `https://santa.example.org/mcp`). Put the server behind HTTPS if it leaves your own network: tokens travel in a header.
 
 ```sh
 bun run admin status   # phase, who joined, counts
@@ -44,7 +45,18 @@ bun run admin draw     # once, when everyone has joined (4 players or more)
 bun run admin reveal   # on the day
 ```
 
-Settings: `SANTA_PORT` (8787), `SANTA_HOST` (127.0.0.1), `SANTA_DB` (`data/santa.db`), `SANTA_INVITE_CODE` (none).
+Server settings (environment variables):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANTA_MIN_BUDGET` | `20` | Smallest budget a player may set. There is no upper limit. |
+| `SANTA_CURRENCY` | `EUR` | Label shown next to amounts. |
+| `SANTA_MAX_PLAYERS` | `200` | Joining stops at this number. |
+| `SANTA_INVITE_CODE` | none | If set, players need it to join. |
+| `SANTA_HOST`, `SANTA_PORT` | `127.0.0.1`, `8787` | Where the server listens. |
+| `SANTA_DB` | `data/santa.db` | The game's database file. |
+
+Budget: each player sets their own, at or above the minimum. A budget is private; no other player sees it, before or after the reveal.
 
 ## What stays secret, and from whom
 

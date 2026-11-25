@@ -45,7 +45,7 @@ test("requests without a valid token are rejected", async () => {
 });
 
 test("a full game over HTTP", async () => {
-  for (const n of names) expect((await call(n, "join", { name: n })).joined_as).toBe(n);
+  for (const n of names) expect((await call(n, "join", { name: n, budget: 25 })).joined_as).toBe(n);
   expect((await call("Ana", "my_assignment")).error).toMatch(/draw has not happened/);
 
   game.draw();
@@ -63,7 +63,7 @@ test("a full game over HTTP", async () => {
   expect((await call("Ana", "inbox")).replies_to_your_questions[0].answer).toBe("Savoury.");
 
   await call("Ana", "post_hint", { hint: "Crunchy, and legally a snack." });
-  const feed = await call("Carmen", "feed");
+  const feed = await call(receiver, "feed");
   expect(feed.hints).toEqual([{ day: feed.hints[0].day, hint_for: receiver, hint: "Crunchy, and legally a snack." }]);
 
   await call(receiver, "guess", { name: "Ana" });

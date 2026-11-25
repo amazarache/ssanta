@@ -6,22 +6,22 @@ function setup(names = ["Ana", "Bogdan", "Carmen", "Dan"], opts = {}) {
   let day = "2026-12-01";
   const game = new Game(new Database(":memory:"), { now: () => new Date(`${day}T10:00:00Z`), ...opts });
   const tok = (n: string) => `hash-${n}`;
-  for (const n of names) game.join(tok(n), n);
+  for (const n of names) game.join(tok(n), n, 20);
   return { game, tok, setDay: (d: string) => (day = d) };
 }
 
 describe("lobby", () => {
   test("rejects duplicate names, bad names and double joins", () => {
     const { game } = setup();
-    expect(() => game.join("x", "ana")).toThrow(/taken/);
-    expect(() => game.join("x", "<script>")).toThrow(GameError);
-    expect(() => game.join("hash-Ana", "Other")).toThrow(/already joined/);
+    expect(() => game.join("x", "ana", 20)).toThrow(/taken/);
+    expect(() => game.join("x", "<script>", 20)).toThrow(GameError);
+    expect(() => game.join("hash-Ana", "Other", 20)).toThrow(/already joined/);
   });
 
   test("invite code is enforced when set", () => {
     const game = new Game(new Database(":memory:"), { inviteCode: "elf" });
-    expect(() => game.join("a", "Ana")).toThrow(/invite/);
-    expect(game.join("a", "Ana", "elf").joined_as).toBe("Ana");
+    expect(() => game.join("a", "Ana", 20)).toThrow(/invite/);
+    expect(game.join("a", "Ana", 20, "elf").joined_as).toBe("Ana");
   });
 
   test("nothing game-related works before the draw", () => {
@@ -29,6 +29,25 @@ describe("lobby", () => {
     expect(() => game.myAssignment(tok("Ana"))).toThrow(/draw has not happened/);
     expect(() => game.ask(tok("Ana"), "hi?")).toThrow(GameError);
     expect(() => game.feed(tok("Ana"))).toThrow(GameError);
+  });
+});
+
+describe("budget", () => {
+  test("has a configurable minimum, no upper limit, and stays private", () => {
+    const game = new Game(new Database(":memory:"), { minBudget: 30, currency: "RON" });
+    expect(() => game.join("a", "Ana", 29.99)).toThrow(/at least 30 RON/);
+    expect(() => game.join("a", "Ana", Number.NaN)).toThrow(/must be a number/);
+    expect(game.join("a", "Ana", 5_000_000).your_budget).toBe(5_000_000);
+    game.join("b", "Bogdan", 30);
+    expect(game.status("b")).toMatchObject({ your_budget: 30, min_budget: 30, currency: "RON" });
+    expect(JSON.stringify(game.status("b"))).not.toContain("5000000");
+    expect(() => game.setBudget("b", 10)).toThrow(/at least 30/);
+    expect(game.setBudget("b", 45.5).your_budget).toBe(45.5);
+  });
+
+  test("default minimum is 20 EUR", () => {
+    const { game } = setup();
+    expect(() => game.join("x", "Zed", 19)).toThrow(/at least 20 EUR/);
   });
 });
 
@@ -41,7 +60,7 @@ describe("draw", () => {
   test("a player can be removed in the lobby only", () => {
     const { game } = setup();
     game.removePlayer("ana");
-    expect(game.join("new-token", "Ana").joined_as).toBe("Ana");
+    expect(game.join("new-token", "Ana", 20).joined_as).toBe("Ana");
     expect(() => game.removePlayer("Nobody")).toThrow(/has joined/);
     game.draw();
     expect(() => game.removePlayer("Ana")).toThrow(/before the draw/);
@@ -58,18 +77,31 @@ describe("draw", () => {
     }
   });
 
+  test("works for 100 players, and status stays small", () => {
+    const names = Array.from({ length: 100 }, (_, i) => `Player ${i + 1}`);
+    const { game, tok } = setup(names);
+    expect(game.draw()).toEqual({ players: 100 });
+    const receivers = names.map((n) => game.myAssignment(tok(n)).you_give_to);
+    names.forEach((n, i) => expect(receivers[i]).not.toBe(n));
+    expect(new Set(receivers).size).toBe(100);
+    for (const n of names) game.postHint(tok(n), "A hint of the full two hundred characters. ".repeat(4));
+    expect(game.feed(tok(names[0]!)).hints).toHaveLength(1);
+    expect(game.feed(tok(names[0]!), "today").hints).toHaveLength(100);
+    expect(JSON.stringify(game.status(tok(names[0]!))).length).toBeLessThan(2500);
+  });
+
   test("happens once, closes joining, and returns no mapping", () => {
     const { game } = setup();
     expect(game.draw()).toEqual({ players: 4 });
     expect(() => game.draw()).toThrow(/already happened/);
-    expect(() => game.join("late", "Late")).toThrow(/closed/);
+    expect(() => game.join("late", "Late", 20)).toThrow(/closed/);
     expect(JSON.stringify(game.adminStatus())).not.toMatch(/giver|receiver|you_give_to/);
   });
 
   test("survives a restart on the same database", () => {
     const db = new Database(":memory:");
     const a = new Game(db, { minPlayers: 3 });
-    ["Ana", "Bogdan", "Carmen"].forEach((n) => a.join(`h-${n}`, n));
+    ["Ana", "Bogdan", "Carmen"].forEach((n) => a.join(`h-${n}`, n, 20));
     a.draw();
     const before = a.myAssignment("h-Ana");
     const b = new Game(db);
@@ -145,7 +177,9 @@ describe("playing", () => {
     expect(() => game.postHint(tok("Ana"), "It also glows.")).toThrow(/already posted/);
     setDay("2026-12-02");
     game.postHint(tok("Ana"), "It also glows.");
-    const feed = game.feed(tok("Bogdan"));
+    expect(game.feed(tok("Ana")).hints).toHaveLength(0);
+    expect(game.feed(tok("Bogdan"), "today").hints).toHaveLength(1);
+    const feed = game.feed(tok(to("Ana")));
     expect(feed.hints).toEqual([
       { day: "2026-12-01", hint_for: to("Ana"), hint: "It hums." },
       { day: "2026-12-02", hint_for: to("Ana"), hint: "It also glows." },

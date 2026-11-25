@@ -8,5 +8,5 @@ It answers your Santa's questions from here, so write only what you are happy to
 - **Things I like:** 
 - **Current obsession:** 
 - **Hard no's:** (allergies, things I already own, things I do not want)
-- **Budget cap for the gift I give:** 
+- **My budget for the gift I give:** (a number; the game has a minimum, 20 EUR unless the organiser changed it, and no upper limit)
 - **Gifts must be:** (physical / digital / either)

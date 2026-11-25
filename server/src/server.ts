@@ -46,11 +46,17 @@ function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): M
 
   tool(
     "join",
-    "Join the game under a display name. Only possible before the draw.",
-    { name: z.string().max(LIMITS.name), invite_code: z.string().max(64).optional() },
-    (a) => game.join(tokenHash, a.name, a.invite_code),
+    "Join the game under a display name, with your budget for the gift you give. Only possible before the draw.",
+    { name: z.string().max(LIMITS.name), budget: z.number(), invite_code: z.string().max(64).optional() },
+    (a) => game.join(tokenHash, a.name, a.budget, a.invite_code),
   );
-  tool("status", "Game phase, list of players, and what is waiting for you.", {}, () => game.status(tokenHash));
+  tool(
+    "set_budget",
+    "Change your budget for the gift you give. It has a minimum and no upper limit. Private to you.",
+    { budget: z.number() },
+    (a) => game.setBudget(tokenHash, a.budget),
+  );
+  tool("status", "Game phase, list of players, your budget and the minimum, and what is waiting for you.", {}, () => game.status(tokenHash));
   tool("my_assignment", "The one person you give a gift to. Private to you.", {}, () => game.myAssignment(tokenHash));
   tool(
     "ask",
@@ -76,7 +82,12 @@ function buildMcp(game: Game, tokenHash: string, log: (line: string) => void): M
     { hint: z.string().max(LIMITS.hint) },
     (a) => game.postHint(tokenHash, a.hint),
   );
-  tool("feed", "All public hints so far, labelled with who each hint is for.", {}, () => game.feed(tokenHash));
+  tool(
+    "feed",
+    "Public hints. scope 'mine' (default): every hint about the gift coming to you. scope 'today': today's hints for all players.",
+    { scope: z.enum(["mine", "today"]).optional() },
+    (a) => game.feed(tokenHash, a.scope),
+  );
   tool(
     "guess",
     "Record your guess of who your Santa is. Can be changed until the reveal.",
@@ -123,6 +134,9 @@ if (import.meta.main) {
   const hostname = process.env.SANTA_HOST ?? "127.0.0.1";
   const game = new Game(openDb(process.env.SANTA_DB ?? "data/santa.db"), {
     inviteCode: process.env.SANTA_INVITE_CODE,
+    minBudget: Number(process.env.SANTA_MIN_BUDGET ?? 20),
+    currency: process.env.SANTA_CURRENCY ?? "EUR",
+    maxPlayers: Number(process.env.SANTA_MAX_PLAYERS ?? LIMITS.maxPlayers),
   });
   // Log lines carry the tool name and outcome only: no names, no text, no tokens.
   const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
