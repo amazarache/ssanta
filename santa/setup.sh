@@ -17,6 +17,10 @@ if [ ! -s .santa-token ]; then
 fi
 [ -f vibe.md ] || cp vibe.example.md vibe.md
 
+# The game agent, in the form this opencode version reads. Written first, so it exists even if a later step fails.
+mkdir -p .opencode/agents
+{ echo '---'; cat "santa/elf.$v.yml"; echo '---'; cat santa/elf.md; } > .opencode/agents/elf.md
+
 # Mode "stdio": opencode starts santa/bridge.mjs locally and the bridge talks to the game server,
 # through the configured HTTP proxy if there is one. Default mode: opencode connects to the server itself.
 mode=${1:-remote}
@@ -34,6 +38,4 @@ else
   mode=remote
   cp "santa/mcp.$v.json" opencode.json
 fi
-mkdir -p .opencode/agents
-{ echo '---'; cat "santa/elf.$v.yml"; echo '---'; cat santa/elf.md; } > .opencode/agents/elf.md
 echo "files-ready ($v, $mode)"
