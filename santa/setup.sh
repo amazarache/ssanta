@@ -2,8 +2,22 @@
 # Creates the player's private files. Safe to run again: it never overwrites the token or the vibe file.
 # Run from the repository root: sh santa/setup.sh          (opencode connects to the game server itself)
 #                           or: sh santa/setup.sh stdio    (through the local bridge, which honours an HTTP proxy)
+#                           or: sh santa/setup.sh claude | codex   (for those clients; then use santa/play.sh)
 set -eu
 cd "$(dirname "$0")/.."
+
+# Claude Code and Codex are started through santa/play.sh, which passes everything they need on the
+# command line. For them, setup creates only the two private files.
+case "${1:-}" in
+  claude|codex)
+    if [ ! -s .santa-token ]; then
+      (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > .santa-token)
+    fi
+    [ -f vibe.md ] || cp vibe.example.md vibe.md
+    echo "files-ready ($1). Fill in vibe.md, then start the game with: sh santa/play.sh $1"
+    exit 0
+    ;;
+esac
 
 # opencode 1.x and 2.x read different config and agent formats.
 major=$(opencode --version 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)

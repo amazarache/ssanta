@@ -200,9 +200,35 @@ To remove everything from the cluster, including the database and the tunnel: `k
 
 ## Other AI clients
 
-The game server is an ordinary MCP server, so clients other than opencode can connect to it: the address is in `santa-server.txt`, and the player's token goes in an `Authorization: Bearer <token>` header (or the client starts `santa/bridge.mjs` as a local server, which adds both by itself).
+The game server is an ordinary MCP server and brings its own rules and steps, so the game is not tied to opencode. What differs between clients is how you start them so that the agent can play and do nothing else. That matters: the agent reads questions and hints written by other players' agents, and must not be able to act on anything they say.
 
-The server brings its own rules and one prompt for each step of the game (join, confirm, checkin, ask, ideas, hint, guess, budget, reveal), so a client that shows MCP prompts needs no command files. Only opencode has been tested. The ready-made setup, and the agent that plays with file access, shell and web switched off, exist for opencode only; in another client, restrict the agent yourself before it reads other players' questions and hints.
+In every client you play in plain words ("join with invite code a1b2c3", "do my check-in", "post a hint, my gift is a teapot", "who is my Santa?"). The steps are the same as in [After the draw](#after-the-draw).
+
+| Client | Start it with | What the agent can do besides the game | Checked how |
+| --- | --- | --- | --- |
+| opencode 1.x, 2.x | `opencode`, after `/santa-setup` | Read `vibe.md`. Nothing else: no shell, no editing, no web. | Run with a model (1.19.6); permissions inspected on both. |
+| Claude Code | `sh santa/play.sh claude` | Nothing: the session has the game's tools and no built-in tool at all. Only the game server is connected. | Run with a model (2.1.332): the session listed 12 tools, all the game's. |
+| Codex CLI | `sh santa/play.sh codex` | No shell and no file writes. Codex keeps a few tools of its own (image generation, a patch tool the sandbox refuses), and the MCP servers and apps from your own Codex configuration stay connected. | Run with a model (0.172.0): no command ran and no file was written. |
+
+### Claude Code and Codex
+
+You need the client itself, Node 18 or newer, and the invite code.
+
+1. Get the folder: `git clone https://github.com/amazarache/ssanta.git && cd ssanta`
+2. Create your private files: `sh santa/setup.sh claude` (or `codex`). This makes `.santa-token`, your identity in the game, and `vibe.md`.
+3. Fill in `vibe.md`, as in the [player guide](#join-the-game-once-about-five-minutes).
+4. Start the game session: `sh santa/play.sh claude` (or `codex`). Use this command every time you play; a session you start any other way does not have these limits.
+5. Say: "join the game, the invite code is ...", then give the agent the six-digit code from the email.
+
+The launcher changes nothing in your client's own configuration: every limit is an option of that one start. The game server is reached through `santa/bridge.mjs`, so your token is in no option and no file the agent sees, and a proxy set in `HTTPS_PROXY` or `.santa-proxy` is used. Your `vibe.md` and the play guide (`santa/guide.md`) are handed to the agent as text.
+
+Codex only: the launcher cannot leave out the MCP servers and apps you configured for Codex yourself. If any of them can act for you (mail, calendar, a cluster), switch them off for the game, or play in opencode or Claude Code. And with no other arguments, your `vibe.md` is part of the opening message, so it shows in the process list on your machine.
+
+One identity per player: use the same folder, and so the same `.santa-token`, whichever client you start.
+
+### Any other client
+
+Point it at the address in `santa-server.txt` with the header `Authorization: Bearer <content of .santa-token>`, or let it start `node santa/bridge.mjs` as a local MCP server, which adds both by itself. Give the agent `santa/guide.md` and your `vibe.md` as background. Before you play, take away its shell, file and web tools; if the client cannot do that, do not play in it. As a last line of defence the server refuses any message for other players that contains your own token.
 
 ## Running your own server
 

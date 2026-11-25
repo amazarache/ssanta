@@ -6,3 +6,4 @@ deploy/dist/
 opencode.json
 .opencode/agents/elf.md
 .santa-proxy
+.santa/

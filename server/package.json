@@ -5,7 +5,8 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "admin": "bun run src/admin.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "guide": "bun run src/guide.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

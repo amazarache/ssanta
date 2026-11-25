@@ -151,3 +151,17 @@ If no number is given, call \`status\` and tell the owner their current budget a
       "Call the `reveal` tool. Announce the owner's Santa, whether the guess was right, and then the full table of pairs. End with one affectionate two-line roast of the best wrong guess.",
   },
 ];
+
+/**
+ * The same rules and steps as one text, for a client that does not show MCP prompts. The launchers in
+ * santa/play.sh hand it to the client as background, so "do my check-in" in plain words is enough.
+ * santa/guide.md is this text; a test keeps the file and this function identical.
+ */
+export function playGuide(): string {
+  const steps = PROMPTS.map((p) => {
+    const args = p.args.length ? ` The owner may give: ${p.args.map((a) => a.description.toLowerCase()).join("; ")}.` : "";
+    const blank = Object.fromEntries(p.args.map((a) => [a.name, `<${a.name.replace(/_/g, " ")}>`]));
+    return `## ${p.title}\n\nWhen the owner asks for this.${args}\n\n${p.text(blank)}`;
+  });
+  return `# Playing Secret Santa\n\nThis session exists only to play the Secret Santa game for its owner through the \`santa\` tools. The owner asks in plain words; the steps below say what to do for each request.\n\n${INSTRUCTIONS}\n\n${steps.join("\n\n")}\n`;
+}

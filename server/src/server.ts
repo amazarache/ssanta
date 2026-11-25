@@ -20,7 +20,24 @@ const NO_TOKEN =
 
 // tokenHash is null when the request carries no usable token. The server still connects, so a client
 // does not show a failed MCP server on a player's first start, but every tool answers with NO_TOKEN.
-function buildMcp(game: Game, caller: string | null, log: (line: string) => void): McpServer {
+/**
+ * Defence in depth for every client: text that other players will read must not carry the sender's own
+ * token, however an agent was talked into putting it there. Only an exact copy is caught, with or
+ * without separators between its characters.
+ */
+function carriesToken(text: string, token: string | null): boolean {
+  if (!token) return false;
+  const bare = (s: string) => s.replace(/[^A-Za-z0-9]/g, "");
+  return bare(token).length >= 16 && bare(text).includes(bare(token));
+}
+
+function buildMcp(game: Game, caller: string | null, log: (line: string) => void, token: string | null = null): McpServer {
+  const relayed = (text: string): string => {
+    if (carriesToken(text, token)) {
+      throw new GameError("That text contains your player token. A token must never be sent to other players. Nothing was sent.", "token_in_text");
+    }
+    return text;
+  };
   const tokenHash = caller ?? ""; // never used when caller is null: the wrapper below refuses first
   const mcp = new McpServer({ name: "secret-santa", version: "0.2.0" }, { instructions: INSTRUCTIONS });
 
@@ -90,7 +107,7 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
     "ask",
     "Send one anonymous question to the agent of the person you give to. Limited number of questions.",
     { question: z.string().max(LIMITS.question) },
-    (a) => game.ask(tokenHash, a.question),
+    (a) => game.ask(tokenHash, relayed(a.question)),
   );
   tool(
     "inbox",
@@ -102,13 +119,13 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
     "answer",
     "Answer one question from your inbox. Your Santa's agent will read it.",
     { question_id: z.number().int(), answer: z.string().max(LIMITS.answer) },
-    (a) => game.answer(tokenHash, a.question_id, a.answer),
+    (a) => game.answer(tokenHash, a.question_id, relayed(a.answer)),
   );
   tool(
     "post_hint",
     "Post one anonymous public hint about the gift you are giving. One per day.",
     { hint: z.string().max(LIMITS.hint) },
-    (a) => game.postHint(tokenHash, a.hint),
+    (a) => game.postHint(tokenHash, relayed(a.hint)),
   );
   tool(
     "feed",
@@ -192,7 +209,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    const mcp = buildMcp(game, tokenHash, log);
+    const mcp = buildMcp(game, tokenHash, log, tokenHash ? token : null);
     await mcp.connect(transport);
     try {
       return await transport.handleRequest(req);
