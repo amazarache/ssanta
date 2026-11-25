@@ -130,7 +130,7 @@ describe("joining by email", () => {
     const { game, sent, ask, said, wait } = setup({ mailDailyCap: 7 });
     await ask("t1", "Ana", "ana@example.org");
     const cooled = await said("t2", "Ana2", "ana@example.org");
-    expect(cooled).toMatch(/^error: A code was sent to this address less than a minute ago.*Your request is saved.*reference: [0-9A-Z]{6}$/);
+    expect(cooled).toMatch(/^error: A code was requested for this address less than a minute ago.*Your request is saved.*reference: [0-9A-Z]{6}$/);
     for (let i = 0; i < 4; i++) {
       wait(61_000);
       await ask("t1", "Ana", "ana@example.org");

@@ -24,7 +24,8 @@ const safe = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "?")
 try {
   const game = new Game(openDb(dbPath()), gameOptions());
   if (cmd === "status" && args.length === 0) {
-    console.log(safe(JSON.stringify(game.adminStatus(), null, 2)));
+    const status = game.adminStatus();
+    console.log(JSON.stringify({ ...status, players: status.players.map(safe) }, null, 2));
   } else if (cmd === "draw" && args.length === 0) {
     const { players } = game.draw();
     console.log(`Draw done for ${players} players. Each player can now read their own assignment.`);

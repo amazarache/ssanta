@@ -405,7 +405,7 @@ export class Game {
     if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email_fp = ? AND sent_at > ?", fp, now - MAIL_COOLDOWN_MS) > 0) {
       return {
         reason: "mail_cooldown",
-        message: "A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.",
+        message: "A code was requested for this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.",
       };
     }
     if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email_fp = ? AND sent_at >= ?", fp, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {

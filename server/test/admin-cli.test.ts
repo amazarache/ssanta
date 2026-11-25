@@ -35,7 +35,7 @@ test("confirm needs address and reference; flags may come first; mistakes exit w
     out: expect.stringContaining("They play as Ana"),
   });
   expect(admin("confirm", "ana@example.org", ref)).toMatchObject({ code: 1 });
-  expect(admin("status").out).toContain('"Ana"');
+  expect(JSON.parse(admin("status").out)).toMatchObject({ phase: "lobby", players: ["Ana"], pending_confirmations: 0 });
   expect(admin("pending").out).toContain("Nobody is waiting");
   expect(admin("nonsense")).toMatchObject({ code: 1, out: expect.stringContaining("Usage") });
 });
