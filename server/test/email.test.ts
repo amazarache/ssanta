@@ -185,19 +185,18 @@ describe("joining by email", () => {
     if (last2() !== old) expect(() => g2.confirm("t1", old)).toThrow(/Wrong code/);
   });
 
-  test("when mail is down, every request is still saved for the host, whatever the daily cap", async () => {
+  test("when mail is down, every request is still saved for the host and none of them uses up the daily cap", async () => {
     const { game, said, wait, logs } = setup({ mailDailyCap: 3, mailer: mailDown });
     const texts: string[] = [];
     for (let i = 0; i < 5; i++) {
       texts.push(await said(`t${i}`, `P${i}`, `p${i}@example.org`));
       wait(1000);
     }
-    expect(texts.slice(0, 3).every((x) => /could not be sent.*Your request is saved.*reference: /.test(x))).toBe(true);
-    expect(texts.slice(3).every((x) => /email limit for today.*Your request is saved.*reference: /.test(x))).toBe(true);
+    expect(texts.every((x) => /could not be sent.*Your request is saved.*reference: /.test(x))).toBe(true);
     expect(game.adminPending().requests).toHaveLength(5);
     expect(game.adminConfirm("p4@example.org", refIn(texts[4]!))).toBe("P4");
     expect(logs.join()).not.toMatch(/example|P\d/);
-    expect(logs.filter((l) => /^mail failed \d+\/(\d+|-)$/.test(l))).toHaveLength(3);
+    expect(logs.filter((l) => /^mail failed \d+\/(\d+|-)$/.test(l))).toHaveLength(5);
   });
 
   test("mail failures give the player a plain message with the reference", async () => {
@@ -223,7 +222,7 @@ describe("joining by email", () => {
     wait(61_000);
     expect((await ask("t1", "Ana Maria", "ana@example.org")).confirmation_sent).toBe(true);
     expect(game.adminPending().requests.map((r) => r.requested_name)).toEqual(["Ana Maria", "Bo"]);
-    expect(game.adminReject(null)).toBe(2);
+    expect(game.adminReject("all")).toBe(2);
     expect((await ask("t3", "Cy", "cy@example.org")).confirmation_sent).toBe(true);
   });
 
@@ -349,14 +348,14 @@ describe("confirming by hand", () => {
     const { game, sent, ask, said } = setup();
     await ask("t1", "Ana", "ana@example.org");
     expect(await said("t1", "Ana", "ana@example.org")).toMatch(/less than a minute/);
-    expect(() => game.adminReject("ana@exmaple.org")).toThrow(/Nothing is pending/);
-    expect(game.adminReject(" ANA@example.org ")).toBe(1);
+    expect(() => game.adminReject({ email: "ana@exmaple.org" })).toThrow(/Nothing is pending/);
+    expect(game.adminReject({ email: " ANA@example.org " })).toBe(1);
     expect(game.adminPending().requests).toEqual([]);
     expect((await ask("t1", "Ana", "ana@example.org")).confirmation_sent).toBe(true); // at once: the cooldown went too
     expect(sent).toHaveLength(2);
     await ask("t2", "Bo", "bo@example.org");
-    expect(game.adminReject(null)).toBe(2);
-    expect(game.adminReject(null)).toBe(0);
+    expect(game.adminReject("all")).toBe(2);
+    expect(game.adminReject("all")).toBe(0);
   });
 
   test("a request outlives its code and stays for seven days; the host commands tidy up by themselves", async () => {
@@ -549,17 +548,27 @@ describe("addresses at rest", () => {
     expect(game.adminPending().requests.find((r) => r.email === "ana@example.org")!.note).toMatch(/already plays as Ana/);
   });
 
-  test("once a request is confirmed, its address is gone from the file itself", async () => {
+  test("once a request is confirmed, rejected or expired, its address is gone from the file and from its log", async () => {
     const path = join(mkdtempSync(join(tmpdir(), "santa-")), "s.db");
     const db = new Database(path);
     const sent: string[] = [];
-    const game = new Game(db, { inviteCode: INVITE, mailer: async (_to, code) => void sent.push(code) });
-    await game.requestJoin("t1", "Ana", 20, "ana.unique.marker@example.org", INVITE);
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    expect(onDisk(path)).toContain("ana.unique.marker@example.org");
-    game.confirm("t1", sent[0]!);
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    expect(onDisk(path)).not.toContain("ana.unique.marker");
+    let t = Date.parse("2026-12-01T10:00:00Z");
+    const game = new Game(db, { now: () => new Date(t), inviteCode: INVITE, mailer: async (_to, code) => void sent.push(code) });
+    const ask = (tok: string, name: string, email: string) => game.requestJoin(tok, name, 20, email, INVITE);
+
+    await ask("t1", "Ana", "confirmed.marker@example.org");
+    expect(onDisk(path)).toContain("confirmed.marker@example.org");
+    game.confirm("t1", sent.at(-1)!);
+    await ask("t2", "Bo", "rejected.marker@example.org");
+    game.adminReject({ email: "rejected.marker@example.org" });
+    await ask("t3", "Cy", "switched.marker@example.org");
+    await ask("t3", "Cy", "cy@example.org"); // the same installation changes its address
+    await ask("t4", "Di", "expired.marker@example.org");
+    t += 8 * 24 * 3600_000;
+    game.adminPending(); // tidies up requests older than seven days
+    // No checkpoint is run by hand here: the game has to leave nothing behind by itself.
+    for (let i = 0; i < 30; i++) await ask(`more${i}`, `P${i}`, `p${i}@example.org`);
+    expect(onDisk(path)).not.toMatch(/(confirmed|rejected|switched|expired)\.marker/);
     expect(game.status("t1").you).toBe("Ana");
   });
 
@@ -574,6 +583,57 @@ describe("addresses at rest", () => {
     const ref = (await server.requestJoin("t2", "X", 20, "ana@example.org", INVITE).catch((e: Error) => ({ request_ref: refIn(e.message) }))).request_ref;
     expect(admin.adminPending().requests[0]!.note).toMatch(/already plays as Ana/);
     expect(() => admin.adminConfirm("ana@example.org", ref)).toThrow(/already plays as Ana/);
+  });
+});
+
+describe("limits on what one caller can store or use up", () => {
+  test("one address takes five waiting installations at most", async () => {
+    const { ask, said, wait } = setup();
+    for (let i = 0; i < 5; i++) {
+      await said(`t${i}`, "X", "x@example.org");
+      wait(1000);
+    }
+    expect(await said("t5", "X", "x@example.org")).toMatch(/Too many installations asked to join with this address/);
+    expect((await ask("other", "Bo", "bo@example.org")).confirmation_sent).toBe(true);
+    expect(await said("t0", "X again", "x@example.org")).not.toMatch(/Too many installations/); // one that already waits may update
+  });
+
+  test("after the draw the host can clear the unlisted requests without touching a player's recovery request", async () => {
+    const { game, ask, said, signUp, wait } = setup({ minPlayers: 3 });
+    await signUp("a", "Ana", "ana@example.org");
+    await signUp("b", "Bo", "bo@example.org");
+    await signUp("c", "Cy", "cy@example.org");
+    game.draw();
+    wait(24 * 3600_000);
+    for (let i = 0; i < 12; i++) await said(`junk${i}`, "J", `junk${i % 4}@example.org`);
+    const anaRef = (await ask("a-new", "Ana", "ana@example.org")).request_ref;
+    expect(game.adminPending()).toMatchObject({ requests: [{ email: "ana@example.org" }], too_late: 12 });
+    expect(game.adminReject("unlisted")).toBe(12);
+    expect(game.adminPending()).toMatchObject({ requests: [{ email: "ana@example.org" }], too_late: 0 });
+    expect(game.adminConfirm("ana@example.org", anaRef, { rebind: true })).toBe("Ana");
+  });
+
+  test("a mail that fails does not use up the address's five a day or the server's daily total", async () => {
+    let down = true;
+    const sent: string[] = [];
+    const { ask, said, wait } = setup({
+      mailDailyCap: 3,
+      mailer: async (_to, code) => {
+        if (down) throw new MailError(429, 10004);
+        sent.push(code);
+      },
+    });
+    for (let i = 0; i < 8; i++) {
+      expect(await said("t1", "Ana", "ana@example.org")).toMatch(/limit is reached.*saved/);
+      wait(61_000);
+    }
+    // Inside the minute after a failure the address still pauses, so an outage is not hammered.
+    expect(await said("t1", "Ana", "ana@example.org")).toMatch(/limit is reached/);
+    expect(await said("t1", "Ana", "ana@example.org")).toMatch(/less than a minute/);
+    wait(61_000);
+    down = false;
+    expect((await ask("t1", "Ana", "ana@example.org")).confirmation_sent).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 });
 
@@ -634,6 +694,42 @@ describe("databases made by earlier versions", () => {
     await game.requestJoin("maza-new", "Whatever", 20, "maza@example.org", INVITE);
     expect(game.confirm("maza-new", sent.at(-1)!).joined_as).toBe("MAZA");
     expect(game.adminStatus().players).toEqual(["Ana", "MAZA"]);
+  });
+});
+
+describe("addresses accepted by an earlier, looser rule", () => {
+  function oldDatabase() {
+    const db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO meta VALUES ('phase', 'lobby');
+      CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL UNIQUE, budget REAL NOT NULL, email TEXT);
+      INSERT INTO players (name, name_key, token_hash, budget, email) VALUES
+        ('Ana', 'ana', 'tok-ana', 20, '_ana@example.org'), ('Bo', 'bo', 'tok-bo', 20, 'bo@example.org');
+      CREATE TABLE registrations (token_hash TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, budget REAL NOT NULL,
+        code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO registrations VALUES ('tok-eve', '$(reboot)@x.co', 'Eve', 20, 'abc', ${Date.now() + 900_000}, 0);
+      INSERT INTO registrations VALUES ('tok-di', 'di@example.org', 'Di', 20, 'abc', ${Date.now() + 900_000}, 0);
+      CREATE TABLE mail_log (email TEXT NOT NULL, sent_at INTEGER NOT NULL);
+    `);
+    return db;
+  }
+
+  test("a waiting request with shell syntax in its address is dropped, so the host is never shown it", () => {
+    const game = new Game(oldDatabase(), { inviteCode: INVITE });
+    expect(game.adminPending().requests.map((r) => r.email)).toEqual(["di@example.org"]);
+  });
+
+  test("a player who can no longer get a code is named to the host", async () => {
+    const db = oldDatabase();
+    const game = new Game(db, { inviteCode: INVITE, mailer: async () => {} });
+    await expect(game.requestJoin("new", "Ana", 20, "_ana@example.org", INVITE)).rejects.toThrow(/email address/);
+    expect(game.adminStatus()).toMatchObject({ cannot_recover_by_email: ["Ana"] });
+    expect(new Game(db).adminStatus()).toMatchObject({ cannot_recover_by_email: ["Ana"] }); // still known after a restart
+    game.removePlayer("Ana");
+    expect("cannot_recover_by_email" in game.adminStatus()).toBe(false);
+    expect("cannot_recover_by_email" in setup().game.adminStatus()).toBe(false);
   });
 });
 

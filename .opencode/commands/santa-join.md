@@ -19,8 +19,8 @@ Then:
 - If the tool says the invite code is wrong: show the owner the exact code you sent, and ask them to run `/santa-join` again with the code from the host on the same line.
 - If the tool refuses for another reason: say why in plain words and what to change.
 
-Whenever the reply or the error holds a request reference (six letters and digits), end your answer with this line, with the reference copied exactly:
+The request reference: the tool gives one only when the request was saved. It is the value of `request_ref` in a reply, or the six characters right after the words `this reference:` in an error. Nothing else is a reference; the invite code is not one.
 
-`If no email arrives, give the host your email address and this reference: <reference>`
-
-Never invent a reference, and never leave out one the tool gave you.
+- If the tool gave a reference, end your answer with this line, with the reference copied exactly:
+  `If no email arrives, give the host your email address and this reference: <reference>`
+- If it gave none (wrong invite code, or an address, name or budget it does not accept), do not mention a reference at all.

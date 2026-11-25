@@ -52,6 +52,7 @@ const CODE_TTL_MS = 15 * 60 * 1000;
 const CODE_ATTEMPTS = 5;
 const MAIL_COOLDOWN_MS = 60 * 1000;
 const MAIL_PER_ADDRESS_PER_DAY = 5;
+const MAX_PENDING_PER_ADDRESS = 5;
 // A request stays on the host's list this long, so it can be confirmed by hand when mail does not arrive.
 const PENDING_KEEP_MS = 7 * 24 * 3600 * 1000;
 // Stored in place of a code hash when no usable code exists. It can never equal a SHA-256 hex digest.
@@ -151,6 +152,7 @@ export class Game {
   private log: (line: string) => void;
   /** Key for address fingerprints. Lives in the database, so it protects against reading, not against guessing. */
   private emailKey = "";
+  private addressRemoved = false;
 
   constructor(
     private db: Database,
@@ -235,7 +237,7 @@ export class Game {
         requested_at INTEGER NOT NULL DEFAULT 0
       );
       -- One row per decision to send a confirmation mail. Only used for the sending limits.
-      CREATE TABLE IF NOT EXISTS mail_log (email_fp TEXT NOT NULL, sent_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS mail_log (email_fp TEXT NOT NULL, sent_at INTEGER NOT NULL, failed INTEGER NOT NULL DEFAULT 0);
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
     const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
@@ -250,6 +252,14 @@ export class Game {
     this.emailKey = (db.query("SELECT value FROM meta WHERE key = 'email_key'").get() as { value: string }).value;
     // A fingerprint is hexadecimal, so an "@" marks a value that is still a readable address.
     const readable = db.query("SELECT id, email_fp FROM players WHERE email_fp LIKE '%@%'").all() as { id: number; email_fp: string }[];
+    // A player whose address would be refused today cannot ask for a new code, so cannot recover a lost
+    // token by email. Their ids are kept, because after this step the address can no longer be read.
+    const stuck = readable.filter((p) => !EMAIL_RE.test(p.email_fp)).map((p) => p.id);
+    if (stuck.length) {
+      const before = db.query("SELECT value FROM meta WHERE key = 'no_email_recovery'").get() as { value: string } | null;
+      const ids = [...new Set([...(before ? (JSON.parse(before.value) as number[]) : []), ...stuck])];
+      db.query("INSERT INTO meta (key, value) VALUES ('no_email_recovery', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(ids));
+    }
     for (const p of readable) db.query("UPDATE players SET email_fp = ? WHERE id = ?").run(this.fingerprint(p.email_fp), p.id);
     let cleaned = readable.length > 0;
     if (columns("mail_log").includes("email")) {
@@ -277,6 +287,17 @@ export class Game {
       );
     }
 
+    if (!columns("mail_log").includes("failed")) db.exec("ALTER TABLE mail_log ADD COLUMN failed INTEGER NOT NULL DEFAULT 0");
+
+    // Addresses were once checked less strictly. A waiting request with an address that would be refused
+    // today is dropped: the host must never be shown, or paste into a shell, anything outside EMAIL_RE.
+    const waiting = db.query("SELECT token_hash, email FROM registrations").all() as Pick<Registration, "token_hash" | "email">[];
+    for (const r of waiting) {
+      if (EMAIL_RE.test(r.email)) continue;
+      db.query("DELETE FROM registrations WHERE token_hash = ?").run(r.token_hash);
+      cleaned = true;
+    }
+
     // One earlier version counted join attempts in a table of their own. Requests are now always recorded instead.
     if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'join_attempts'").get()) {
       db.exec("DROP TABLE join_attempts");
@@ -289,7 +310,25 @@ export class Game {
 
   /** Runs fn as one immediate transaction: nothing from the other process can land between its reads and its writes. */
   private tx<T>(fn: () => T): T {
-    return this.db.transaction(fn).immediate();
+    if (this.db.inTransaction) return this.db.transaction(fn).immediate(); // nested: a savepoint of the outer one
+    this.addressRemoved = false;
+    const result = this.db.transaction(fn).immediate();
+    if (this.addressRemoved) {
+      // secure_delete has zeroed the address in the database file, but earlier copies of the page are still
+      // in the write-ahead log. Fold the log into the file and empty it. Best effort: it gives up, without
+      // an error, while the other process is reading.
+      try {
+        this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      } catch {}
+    }
+    return result;
+  }
+
+  /** Deletes join requests and notes that readable addresses went, so tx() empties the write-ahead log afterwards. */
+  private dropRequests(where: string, ...args: (string | number)[]): number {
+    const n = this.db.query(`DELETE FROM registrations ${where}`).run(...args).changes;
+    if (n > 0) this.addressRemoved = true;
+    return n;
   }
 
   private count(sql: string, ...args: (string | number)[]): number {
@@ -408,10 +447,11 @@ export class Game {
         message: "A code was requested for this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.",
       };
     }
-    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email_fp = ? AND sent_at >= ?", fp, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
+    // A send that failed still starts the one-minute pause above, but does not use up the allowances below.
+    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE failed = 0 AND email_fp = ? AND sent_at >= ?", fp, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
       return { reason: "mail_address_limit", message: "Too many codes were sent to this address today, so no new one goes out until tomorrow." };
     }
-    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE sent_at >= ?", dayStart) >= this.mailDailyCap) {
+    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE failed = 0 AND sent_at >= ?", dayStart) >= this.mailDailyCap) {
       return { reason: "mail_daily_cap", message: "The server reached its email limit for today, so no code goes out until tomorrow." };
     }
     return null;
@@ -419,7 +459,7 @@ export class Game {
 
   /** Drops join requests and mail records too old for anyone to act on. */
   private purge(now: number): void {
-    this.db.query("DELETE FROM registrations WHERE requested_at < ?").run(now - PENDING_KEEP_MS);
+    this.dropRequests("WHERE requested_at < ?", now - PENDING_KEEP_MS);
     this.db.query("DELETE FROM mail_log WHERE sent_at < ?").run(now - PENDING_KEEP_MS);
   }
 
@@ -454,6 +494,11 @@ export class Game {
       if (!mine && this.count("SELECT COUNT(*) AS c FROM registrations") >= this.maxPending) {
         throw new GameError("Too many join requests are waiting for the host. Tell the host.", "pending_full");
       }
+      // One address cannot fill the list: a handful of installations per address is already unusual.
+      const others = this.count("SELECT COUNT(*) AS c FROM registrations WHERE email = ? AND token_hash <> ?", e, tokenHash);
+      if (others >= MAX_PENDING_PER_ADDRESS) {
+        throw new GameError("Too many installations asked to join with this address. Tell the host.", "pending_full");
+      }
       // A reference belongs to one installation asking for one address. A change of address gets a new one.
       const sameAddress = mine !== null && mine.email === e;
       const ref = sameAddress ? mine.ref : this.newRef();
@@ -466,6 +511,7 @@ export class Game {
           this.db.query("UPDATE registrations SET name = ?, budget = ?, requested_at = ? WHERE token_hash = ?").run(n, b, now, tokenHash);
         } else {
           // New request, or a new address: any earlier code went to another mailbox and must stop working.
+          if (mine) this.addressRemoved = true;
           this.saveRequest(tokenHash, e, n, b, ref, now, NO_CODE, 0);
         }
         return { ref, limit, code: null, lobby };
@@ -473,6 +519,7 @@ export class Game {
 
       // A code is usable in the lobby, and later only for an address that already plays (to recover a lost
       // token). Any other request is recorded in the same shape with a code that matches nothing.
+      if (mine && !sameAddress) this.addressRemoved = true;
       const usable = lobby || this.playerByEmail(e) !== null;
       const code = String(this.rand(1_000_000)).padStart(6, "0");
       this.saveRequest(tokenHash, e, n, b, ref, now, usable ? this.codeHash(tokenHash, code) : NO_CODE, now + CODE_TTL_MS);
@@ -500,6 +547,8 @@ export class Game {
     } catch (err) {
       const m = err instanceof MailError ? err : new MailError(0, null);
       this.log(m.message);
+      // Lobby only. After the draw a failure is never recorded: it would make a playing address behave differently.
+      this.db.query("UPDATE mail_log SET failed = 1 WHERE email_fp = ? AND sent_at = ?").run(this.fingerprint(e), now);
       const why =
         m.code === 10208
           ? "The mail service refused this address (the host's mail plan only allows verified addresses)."
@@ -585,12 +634,12 @@ export class Game {
           throw new GameError("This installation already plays as someone else.", "already_joined");
         }
         this.db.query("UPDATE players SET token_hash = ? WHERE id = ?").run(tokenHash, existing.id);
-        this.db.query("DELETE FROM registrations WHERE email = ?").run(reg.email);
+        this.dropRequests("WHERE email = ?", reg.email);
         return { joined_as: existing.name, note: "Welcome back. This installation now plays as you; the old one no longer does." };
       }
       this.requirePhaseForJoin();
       const players = this.insertPlayer(tokenHash, reg.name, reg.budget, reg.email);
-      this.db.query("DELETE FROM registrations WHERE email = ?").run(reg.email);
+      this.dropRequests("WHERE email = ?", reg.email);
       return { joined_as: reg.name, your_budget: reg.budget, currency: this.currency, players };
     });
   }
@@ -823,16 +872,30 @@ export class Game {
     });
   }
 
-  /** Clears the pending requests of one address, or of all with email null, and their sending limits. Returns how many requests went. */
-  adminReject(email: string | null): number {
+  /**
+   * Clears pending requests and the sending limits that go with them. Returns how many requests went.
+   * which: an address; "all"; or "unlisted" for the requests the pending list does not show, because
+   * their address is not in the game and the draw is done.
+   */
+  adminReject(which: { email: string } | "all" | "unlisted"): number {
     return this.tx(() => {
-      if (email === null) {
-        const n = this.db.query("DELETE FROM registrations").run().changes;
+      if (which === "all") {
         this.db.query("DELETE FROM mail_log").run();
+        return this.dropRequests("");
+      }
+      if (which === "unlisted") {
+        const listed = new Set(this.confirmable().map((r) => r.token_hash));
+        const rows = this.db.query("SELECT token_hash, email FROM registrations").all() as Pick<Registration, "token_hash" | "email">[];
+        let n = 0;
+        for (const r of rows) {
+          if (listed.has(r.token_hash)) continue;
+          n += this.dropRequests("WHERE token_hash = ?", r.token_hash);
+          this.db.query("DELETE FROM mail_log WHERE email_fp = ?").run(this.fingerprint(r.email));
+        }
         return n;
       }
-      const e = email.trim().toLowerCase();
-      const n = this.db.query("DELETE FROM registrations WHERE email = ?").run(e).changes;
+      const e = which.email.trim().toLowerCase();
+      const n = this.dropRequests("WHERE email = ?", e);
       if (n === 0) throw new GameError("Nothing is pending for that address. Check the spelling against the pending list.");
       this.db.query("DELETE FROM mail_log WHERE email_fp = ?").run(this.fingerprint(e));
       return n;
@@ -863,7 +926,7 @@ export class Game {
             note: notes.join("; "),
           };
         }),
-        /** Requests made after the draw for addresses that are not in the game. They cannot join. */
+        /** Requests the host can no longer confirm: the draw is done and their address is not in the game. */
         too_late: total - listed.length,
       };
     });
@@ -885,6 +948,15 @@ export class Game {
     });
   }
 
+  /** Players who joined under an older, looser address rule and cannot get a new code today. Empty in almost every game. */
+  private noEmailRecovery(): { cannot_recover_by_email?: string[] } {
+    const row = this.db.query("SELECT value FROM meta WHERE key = 'no_email_recovery'").get() as { value: string } | null;
+    if (!row) return {};
+    const ids = JSON.parse(row.value) as number[];
+    const names = (this.db.query("SELECT id, name FROM players ORDER BY name_key").all() as Player[]).filter((p) => ids.includes(p.id)).map((p) => p.name);
+    return names.length ? { cannot_recover_by_email: names } : {};
+  }
+
   /** Counts only. Safe to print on the organiser's terminal. */
   adminStatus() {
     const c = (t: string) => this.count(`SELECT COUNT(*) AS c FROM ${t}`);
@@ -895,6 +967,7 @@ export class Game {
       hints: c("hints"),
       guesses: c("guesses"),
       pending_confirmations: this.confirmable().length,
+      ...this.noEmailRecovery(),
     };
   }
 }

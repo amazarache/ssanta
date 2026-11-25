@@ -49,7 +49,7 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
   tool(
     "join",
     game.emailMode
-      ? "Ask to join the game: display name, budget for the gift you give, and your email address. A six-digit code is mailed to that address; finish with the confirm tool. The reply, also when it is an error, carries a request reference: show it to the owner exactly as written."
+      ? "Ask to join the game: display name, budget for the gift you give, and your email address. A six-digit code is mailed to that address; finish with the confirm tool. Once the request is saved, the reply (also an error reply) holds a request reference, in the field request_ref or after the words \"this reference:\". Show the owner that reference exactly as written. Errors about the invite code, the address, the name or the budget hold none."
       : "Join the game under a display name, with your budget for the gift you give. Only possible before the draw.",
     {
       name: z.string().max(LIMITS.name),

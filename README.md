@@ -131,8 +131,8 @@ The game server already runs on the k3s cluster and is reachable at `https://san
    - The reference is the proof. Anyone with the invite code can file a request under any address, but only the installation that filed it is shown its reference, and `pending` never prints one. So take the reference only from the player, on a channel where you know it is them.
    - Every valid request is on the list for 7 days, whether or not a mail went out.
    - If the address already plays, `confirm` refuses: confirming would move that player to another installation. For a player who really lost their token, check with them and add `--rebind`.
-   - To tidy up: `reject ana@example.org` clears the requests for one address, and `reject --all` clears the whole list. Both also lift the mail limits, so the players can ask again at once.
-   - If the list fills with requests you do not recognise, someone is misusing the invite code. Clear the list with `reject --all`, change the invite code (see "Changing the settings"), and give the new one to your players.
+   - To tidy up: `reject ana@example.org` clears the requests for one address, `reject --all` clears everything, and `reject --late` clears only the requests the list does not show (after the draw, those of addresses that are not in the game). All of them also lift the mail limits, so the players can ask again at once.
+   - If the list fills with requests you do not recognise, or a player is told that too many requests are waiting, someone is misusing the invite code. Clear the junk (`reject --late` after the draw, `reject --all` before it), change the invite code (see "Changing the settings"), and give the new one to your players.
 8. If someone joined under a wrong name, remove them so they can join again. This works only before the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js remove "Ana"
@@ -184,6 +184,7 @@ A new minimum applies to players who join or change their budget afterwards; bud
 | A player cannot connect, others can | It is on the player's side: missing `.santa-token` or opencode not restarted. |
 | A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. If the mail does not arrive, check with them directly and run `admin.js confirm <email> <reference> --rebind`. |
 | Many players report that no email arrives | `kubectl -n santa logs deploy/santa` shows `mail failed <status>/<code>` lines: 429 means the mail service's limit, 403/10208 means its plan only sends to verified addresses. Their requests are saved all the same; confirm them by hand with the reference each one sends you. |
+| `status` lists a name under `cannot_recover_by_email` | That player joined when addresses were checked less strictly, and theirs would be refused today, so they cannot get a new code if they lose their token. Before the draw, remove them and have them join again with a plain address. |
 | The server log says `JOINING IS OFF` | Email confirmation is on but no invite code is set. Create the `santa-invite` secret and restart the server. |
 
 ### After the game
@@ -230,7 +231,7 @@ kubectl -n santa create secret generic santa-mail \
 kubectl -n santa rollout restart deploy/santa
 ```
 
-Limits on mail: one code per address per minute, five per address per day, and `SANTA_MAIL_DAILY_CAP` in total per day. A limit stops the mail, not the request: the player is told that the request is saved and can be confirmed by hand. At most three times `SANTA_MAX_PLAYERS` requests can wait at once.
+Limits on mail: one code per address per minute, five per address per day, and `SANTA_MAIL_DAILY_CAP` in total per day. A mail that fails to send starts the one-minute pause but does not count towards the daily numbers. A limit stops the mail, not the request: the player is told that the request is saved and can be confirmed by hand. At most three times `SANTA_MAX_PLAYERS` requests can wait at once, and at most five per address.
 
 The server does not limit how often it is called. If you expose it to the internet, add a rate-limiting rule at your proxy or CDN.
 

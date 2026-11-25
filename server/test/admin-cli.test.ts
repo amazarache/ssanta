@@ -65,3 +65,31 @@ test("the admin command enforces the same settings as the server", async () => {
   const bad = world({ SANTA_MAX_PLAYERS: "lots" });
   expect(bad.admin("status")).toMatchObject({ code: 1, out: expect.stringContaining("SANTA_MAX_PLAYERS must be a number") });
 });
+
+test("an option the command does not know stops it before anything happens", async () => {
+  const { admin, ask, game } = world();
+  for (const [t, n] of [["a", "Ana"], ["b", "Bo"], ["c", "Cy"]] as const) {
+    const ref = (await ask(t, n, `${n.toLowerCase()}@example.org`)).request_ref;
+    expect(admin("confirm", `${n.toLowerCase()}@example.org`, ref).code).toBe(0);
+  }
+  for (const args of [["draw", "--help"], ["draw", "--dry-run"], ["reveal", "--anything"], ["status", "--all"], ["reject", "--all", "--late"], ["confirm", "--force", "a@b.co", "K7Q42M"]]) {
+    expect(admin(...args)).toMatchObject({ code: 1, out: expect.stringContaining("Usage") });
+  }
+  expect(game.phase()).toBe("lobby");
+  expect(admin("draw", "extra")).toMatchObject({ code: 1 });
+  expect(game.phase()).toBe("lobby");
+});
+
+test("reject --late clears only what the list does not show", async () => {
+  const { admin, ask, game } = world();
+  for (const [t, n] of [["a", "Ana"], ["b", "Bo"], ["c", "Cy"], ["e", "Ema"]] as const) {
+    game.adminConfirm(`${n.toLowerCase()}@example.org`, (await ask(t, n, `${n.toLowerCase()}@example.org`)).request_ref);
+  }
+  await ask("d", "Di", "di@example.org"); // asked in time, never confirmed
+  expect(admin("draw").code).toBe(0);
+  const list = admin("pending").out;
+  expect(list).toContain("1 request(s) are not listed");
+  expect(list).not.toContain("came after the draw");
+  expect(admin("reject", "--late").out).toContain("Cleared 1 pending request(s)");
+  expect(admin("pending").out).not.toContain("not listed");
+});

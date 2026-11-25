@@ -132,3 +132,11 @@ test("the stdio bridge relays MCP messages to the server", async () => {
   expect(replies[0].result.serverInfo.name).toBe("secret-santa");
   expect(replies[1].result.tools.length).toBeGreaterThan(10);
 });
+
+test("the root address describes the service", async () => {
+  const res = await fetch(`http://127.0.0.1:${server.port}/`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/html");
+  expect(await res.text()).toContain("Secret Santa");
+  expect((await fetch(`http://127.0.0.1:${server.port}/robots.txt`)).status).toBe(200);
+});
