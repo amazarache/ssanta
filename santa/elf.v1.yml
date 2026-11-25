@@ -1,0 +1,15 @@
+description: Plays Secret Santa for its owner through the santa game server
+mode: primary
+permission:
+  bash: deny
+  edit: deny
+  webfetch: deny
+  websearch: deny
+  grep: deny
+  glob: deny
+  list: deny
+  task: deny
+  read:
+    "*": deny
+    "vibe.md": allow
+    "*/vibe.md": allow

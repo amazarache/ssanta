@@ -283,12 +283,12 @@ export class Game {
       await this.mailer(e, code);
       this.log("mail ok");
     } catch (err) {
-      this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
+      // The pending registration stays, so the host can still let the player in with `admin confirm`.
       const m = err instanceof MailError ? err : new MailError(0, null);
       this.log(m.message);
-      if (m.code === 10208) throw new GameError("The mail service only allows verified addresses right now. Tell the host.", "mail_failed");
-      if (m.status === 429) throw new GameError("The mail service limit is reached. Try again later or ask the host to confirm you.", "mail_failed");
-      throw new GameError("The confirmation email could not be sent. Check the address, or ask the host to confirm you.", "mail_failed");
+      if (m.code === 10208) throw new GameError("The mail service refused this address (the host's mail plan only allows verified addresses). Your request is saved: ask the host to confirm you by hand.", "mail_failed");
+      if (m.status === 429) throw new GameError("The mail service limit is reached. Your request is saved: try again later, or ask the host to confirm you by hand.", "mail_failed");
+      throw new GameError("The confirmation email could not be sent. Check the address in vibe.md. Your request is saved: the host can also confirm you by hand.", "mail_failed");
     }
     return CODE_SENT_REPLY;
   }

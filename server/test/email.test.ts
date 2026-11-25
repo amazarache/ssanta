@@ -124,7 +124,7 @@ describe("joining by email", () => {
 
   test("mail failures give the player a plain message and log only codes", async () => {
     for (const [err, msg] of [
-      [new MailError(403, 10208), /verified addresses/],
+      [new MailError(403, 10208), /verified addresses.*saved/],
       [new MailError(429, 10004), /limit is reached/],
       [new Error("boom"), /could not be sent/],
     ] as const) {
@@ -134,7 +134,8 @@ describe("joining by email", () => {
         },
       });
       await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(msg);
-      expect(game.adminStatus().pending_confirmations).toBe(0);
+      expect(game.adminPending()).toEqual(["ana@example.org"]);
+      expect(game.adminConfirm("ana@example.org")).toBe("Ana");
       expect(logs.join()).not.toMatch(/ana|example/i);
       expect(logs[0]).toMatch(/^mail failed \d+\/(\d+|-)$/);
     }

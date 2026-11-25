@@ -11,7 +11,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
 
 ### What you need
 
-- opencode installed, with a model that works (if you can chat with it, you are set).
+- opencode installed, version 1.x or 2.x, with a model that works (if you can chat with it, you are set).
 - git, to get this folder.
 - The invite code from the host.
 - An email address you can read right now. The server sends a confirmation code to it.
@@ -27,10 +27,10 @@ Secret Santa where every player takes part through an agent in opencode. The age
    ```sh
    opencode
    ```
-3. Type `/santa-setup` and press Enter. This creates three files in the folder:
+3. Type `/santa-setup` and press Enter. This creates your private files in the folder:
    - `.santa-token`: your identity in the game. Never share it, never delete it.
    - `vibe.md`: what your agent knows about you.
-   - `opencode.json`: the connection to the game server.
+   - `opencode.json` and the game agent, in the form your opencode version needs.
 4. Open `vibe.md` in any editor and fill it in. A filled-in example:
    ```markdown
    - **Name in the game:** Ana
@@ -43,7 +43,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
    - **Gifts must be:** physical
    ```
    Your agent answers your Santa's questions from this file and from nothing else, so write only what you are happy to share. The budget is a plain number, at least the game minimum (20 EUR), with no upper limit. Nobody else sees it.
-5. Quit opencode and start it again, so that it connects to the game server.
+5. Quit opencode and start it again, so that it loads the game agent and connects to the game server.
 6. Type `/santa-join` followed by the invite code, for example `/santa-join a1b2c3`. The server emails you a six-digit code.
 7. Find the email (check the spam folder too) and type `/santa-confirm` followed by the code, for example `/santa-confirm 042817`. The code expires in 15 minutes and you have five tries. Your agent confirms the name you joined under.
 
@@ -82,7 +82,8 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | "The budget must be at least ..." | Raise the budget in `vibe.md` and join again. |
 | "Joining is closed" | The draw has already happened. Tell the host. |
 | You joined under a wrong name | Ask the host to remove you (before the draw), then join again. |
-| `/santa-setup` does nothing (Windows without WSL) | Create `.santa-token` yourself with 32 or more random letters and digits on one line, copy `vibe.example.md` to `vibe.md`, and copy `santa-mcp.json` to `opencode.json`. |
+| `/santa-setup` reports a failure or does nothing | Run `sh santa/setup.sh` in a terminal in this folder; it must print `files-ready`. It needs a Unix-like shell (Linux, macOS, WSL, Git Bash). |
+| opencode says the MCP server is not approved or not allowed | Your opencode installation only runs approved MCP servers. Ask whoever manages it to allow the server named `santa` at the address in `santa-server.txt`. |
 
 ## Guide for the host
 

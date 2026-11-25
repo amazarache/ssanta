@@ -1,0 +1,27 @@
+description: Plays Secret Santa for its owner through the santa game server
+mode: primary
+permissions:
+  - action: shell
+    resource: "*"
+    effect: deny
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: grep
+    resource: "*"
+    effect: deny
+  - action: glob
+    resource: "*"
+    effect: deny
+  - action: subagent
+    resource: "*"
+    effect: deny
+  - action: webfetch
+    resource: "*"
+    effect: deny
+  - action: read
+    resource: "*"
+    effect: deny
+  - action: read
+    resource: "vibe.md"
+    effect: allow

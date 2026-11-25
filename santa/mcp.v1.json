@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "santa": {
+      "type": "remote",
+      "url": "{file:santa-server.txt}",
+      "enabled": true,
+      "oauth": false,
+      "headers": { "Authorization": "Bearer {file:.santa-token}" }
+    }
+  }
+}
