@@ -8,7 +8,15 @@ import type { Database } from "bun:sqlite";
 import { createHash, randomInt } from "node:crypto";
 import { MailError, type Mailer } from "./mail.ts";
 
-export class GameError extends Error {}
+export class GameError extends Error {
+  /** A fixed word for the server log. Never contains anything a player typed. */
+  constructor(
+    message: string,
+    public reason = "rule",
+  ) {
+    super(message);
+  }
+}
 
 export type Phase = "lobby" | "playing" | "revealed";
 
@@ -66,7 +74,7 @@ function clean(text: string, max: number, what: string): string {
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!t) throw new GameError(`The ${what} is empty.`);
+  if (!t) throw new GameError(`The ${what} is empty.`, `empty_${what}`);
   if (t.length > max) throw new GameError(`The ${what} is too long (max ${max} characters).`);
   return t;
 }
@@ -167,7 +175,7 @@ export class Game {
 
   private player(tokenHash: string): Player {
     const p = this.db.query("SELECT id, name FROM players WHERE token_hash = ?").get(tokenHash) as Player | null;
-    if (!p) throw new GameError("You have not joined this game yet. Use the join tool first.");
+    if (!p) throw new GameError("You have not joined this game yet. Use the join tool first.", "not_joined");
     return p;
   }
 
@@ -200,9 +208,9 @@ export class Game {
 
   private budget(value: number): number {
     const b = Math.round(Number(value) * 100) / 100;
-    if (!Number.isFinite(b)) throw new GameError("The budget must be a number.");
+    if (!Number.isFinite(b)) throw new GameError("The budget must be a number.", "budget");
     if (b < this.minBudget) {
-      throw new GameError(`The budget must be at least ${this.minBudget} ${this.currency}. There is no upper limit.`);
+      throw new GameError(`The budget must be at least ${this.minBudget} ${this.currency}. There is no upper limit.`, "budget");
     }
     return b;
   }
@@ -226,7 +234,7 @@ export class Game {
 
   private cleanName(name: string): string {
     const n = clean(name, LIMITS.name, "name");
-    if (!NAME_RE.test(n)) throw new GameError("Use letters, digits, spaces, dots, dashes or underscores in the name.");
+    if (!NAME_RE.test(n)) throw new GameError("Use letters, digits, spaces, dots, dashes or underscores in the name.", "name");
     return n;
   }
 
@@ -236,25 +244,25 @@ export class Game {
    */
   async requestJoin(tokenHash: string, name: string, budget: number, email: string, inviteCode?: string) {
     if (!this.mailer) throw new GameError("This game does not use email confirmation.");
-    if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.");
+    if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.", "invite");
     const e = String(email ?? "").trim().toLowerCase();
-    if (e.length > 254 || !EMAIL_RE.test(e)) throw new GameError("That does not look like an email address.");
+    if (e.length > 254 || !EMAIL_RE.test(e)) throw new GameError("That does not look like an email address.", "email");
     const n = this.cleanName(name);
     const b = this.budget(budget);
     const already = this.db.query("SELECT name FROM players WHERE token_hash = ?").get(tokenHash) as { name: string } | null;
-    if (already) throw new GameError(`You already joined as ${already.name}.`);
+    if (already) throw new GameError(`You already joined as ${already.name}.`, "already_joined");
 
     const now = this.now().getTime();
     const dayStart = Date.parse(`${this.today()}T00:00:00Z`);
     const count = (sql: string, ...a: (string | number)[]) => (this.db.query(sql).get(...a) as { c: number }).c;
     if (count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at > ?", e, now - MAIL_COOLDOWN_MS) > 0) {
-      throw new GameError("A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.");
+      throw new GameError("A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.", "mail_cooldown");
     }
     if (count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at >= ?", e, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
-      throw new GameError("Too many codes were sent to this address today. Try again tomorrow or ask the host to confirm you.");
+      throw new GameError("Too many codes were sent to this address today. Try again tomorrow or ask the host to confirm you.", "mail_address_limit");
     }
     if (count("SELECT COUNT(*) AS c FROM mail_log WHERE sent_at >= ?", dayStart) >= this.mailDailyCap) {
-      throw new GameError("The server reached its email limit for today. Try again tomorrow or ask the host to confirm you.");
+      throw new GameError("The server reached its email limit for today. Try again tomorrow or ask the host to confirm you.", "mail_daily_cap");
     }
 
     const code = String(this.rand(1_000_000)).padStart(6, "0");
@@ -278,9 +286,9 @@ export class Game {
       this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
       const m = err instanceof MailError ? err : new MailError(0, null);
       this.log(m.message);
-      if (m.code === 10208) throw new GameError("The mail service only allows verified addresses right now. Tell the host.");
-      if (m.status === 429) throw new GameError("The mail service limit is reached. Try again later or ask the host to confirm you.");
-      throw new GameError("The confirmation email could not be sent. Check the address, or ask the host to confirm you.");
+      if (m.code === 10208) throw new GameError("The mail service only allows verified addresses right now. Tell the host.", "mail_failed");
+      if (m.status === 429) throw new GameError("The mail service limit is reached. Try again later or ask the host to confirm you.", "mail_failed");
+      throw new GameError("The confirmation email could not be sent. Check the address, or ask the host to confirm you.", "mail_failed");
     }
     return CODE_SENT_REPLY;
   }
@@ -293,14 +301,14 @@ export class Game {
       | { code_hash: string; expires_at: number; attempts: number }
       | null;
     const restart = "Run /santa-join again to get a new code.";
-    if (!reg) throw new GameError(`There is no code waiting for you. ${restart}`);
+    if (!reg) throw new GameError(`There is no code waiting for you. ${restart}`, "no_code");
     if (reg.expires_at < this.now().getTime() || reg.attempts >= CODE_ATTEMPTS) {
       this.db.query("DELETE FROM registrations WHERE token_hash = ?").run(tokenHash);
-      throw new GameError(`That code is no longer valid. ${restart}`);
+      throw new GameError(`That code is no longer valid. ${restart}`, "code_expired");
     }
     if (reg.code_hash !== this.codeHash(tokenHash, c)) {
       this.db.query("UPDATE registrations SET attempts = attempts + 1 WHERE token_hash = ?").run(tokenHash);
-      throw new GameError(`Wrong code. ${CODE_ATTEMPTS - reg.attempts - 1} tries left.`);
+      throw new GameError(`Wrong code. ${CODE_ATTEMPTS - reg.attempts - 1} tries left.`, "wrong_code");
     }
     return this.promote(tokenHash);
   }
@@ -336,13 +344,13 @@ export class Game {
   }
 
   join(tokenHash: string, name: string, budget: number, inviteCode?: string) {
-    if (this.mailer) throw new GameError("This game needs your email address to join.");
+    if (this.mailer) throw new GameError("This game needs your email address to join.", "email");
     this.requirePhaseForJoin();
-    if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.");
+    if (this.inviteCode && inviteCode !== this.inviteCode) throw new GameError("Wrong invite code.", "invite");
     const n = clean(name, LIMITS.name, "name");
-    if (!NAME_RE.test(n)) throw new GameError("Use letters, digits, spaces, dots, dashes or underscores in the name.");
+    if (!NAME_RE.test(n)) throw new GameError("Use letters, digits, spaces, dots, dashes or underscores in the name.", "name");
     const existing = this.db.query("SELECT id, name FROM players WHERE token_hash = ?").get(tokenHash) as Player | null;
-    if (existing) throw new GameError(`You already joined as ${existing.name}.`);
+    if (existing) throw new GameError(`You already joined as ${existing.name}.`, "already_joined");
     const count = (this.db.query("SELECT COUNT(*) AS c FROM players").get() as { c: number }).c;
     const b = this.budget(budget);
     if (count >= this.maxPlayers) throw new GameError("The game is full.");
@@ -355,7 +363,7 @@ export class Game {
   }
 
   private requirePhaseForJoin(): void {
-    if (this.phase() !== "lobby") throw new GameError("Joining is closed: the draw has already happened.");
+    if (this.phase() !== "lobby") throw new GameError("Joining is closed: the draw has already happened.", "closed");
   }
 
   status(tokenHash: string) {

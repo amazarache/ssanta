@@ -80,7 +80,7 @@ test("a full game over HTTP", async () => {
 
   // Log lines hold a tool name and an outcome, nothing else.
   expect(logs.length).toBeGreaterThan(10);
-  for (const l of logs) expect(l).toMatch(/^[a-z_]+ (ok|refused|failed)$/);
+  for (const l of logs) expect(l).toMatch(/^[a-z_]+ (ok|refused [a-z_]+|failed)$/);
 });
 
 test("joining by email over HTTP", async () => {

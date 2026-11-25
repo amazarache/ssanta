@@ -29,13 +29,13 @@ function buildMcp(game: Game, caller: string | null, log: (line: string) => void
   ) => {
     mcp.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>) => {
       try {
-        if (caller === null) throw new GameError(NO_TOKEN);
+        if (caller === null) throw new GameError(NO_TOKEN, "no_token");
         const result = await run(args);
         log(`${name} ok`);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         if (err instanceof GameError) {
-          log(`${name} refused`);
+          log(`${name} refused ${err.reason}`);
           return { isError: true, content: [{ type: "text" as const, text: err.message }] };
         }
         log(`${name} failed`);
