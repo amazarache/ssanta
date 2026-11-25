@@ -7,4 +7,4 @@ Setup result: !`test -s .santa-token || (umask 077; head -c 24 /dev/urandom | od
 Do not call any tool. Tell the owner, in three short lines:
 1. Their private token and `vibe.md` now exist in this folder. The token must never be shared or committed.
 2. They should fill in `vibe.md` now.
-3. They must then run `opencode reload` in a terminal (or restart opencode) so the token is picked up, and after that run `/santa-join`.
+3. They must then quit and restart opencode so the token is picked up, and after that run `/santa-join` followed by the invite code from the host.
