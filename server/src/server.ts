@@ -9,7 +9,7 @@ import { z } from "zod";
 import { BOARD_REFRESH_MS, type BoardCounts, type BoardSettings, renderBoard } from "./board.ts";
 import { boardSettings, dbPath, gameOptions, publicUrl } from "./config.ts";
 import { openDb } from "./db.ts";
-import { Game, GameError, LIMITS, PAGE_TICKET_PREFIX } from "./game.ts";
+import { Game, GameError, LIMITS } from "./game.ts";
 import { renderClosed, renderGate, renderMe } from "./me.ts";
 import { cloudflareMailer } from "./mail.ts";
 import { INSTRUCTIONS, PROMPTS } from "./prompts.ts";
@@ -32,10 +32,26 @@ function carriesToken(text: string, token: string | null): boolean {
   return bare(token).length >= 16 && bare(text).includes(bare(token));
 }
 
-/** True if the text holds a link ticket for a player's page, whatever is wedged between its characters. */
-function carriesPageTicket(text: string): boolean {
-  const squeezed = text.replace(/[\s\-_.,:;|/\\]/g, "");
-  return new RegExp(`${PAGE_TICKET_PREFIX.replace(/_/g, "")}[0-9a-f]{16}`, "i").test(squeezed);
+/**
+ * True if the text holds a ticket that could still open some player's page: an exact copy of its 32
+ * hexadecimal characters, in any case, percent-encoded or not, with anything that is not a letter or a
+ * digit wedged between them. A ticket cut into pieces across several messages is not caught.
+ */
+function carriesPageTicket(text: string, game: Game): boolean {
+  let plain = text;
+  for (let i = 0; i < 2; i++) {
+    try {
+      plain = decodeURIComponent(plain);
+    } catch {
+      break;
+    }
+  }
+  const bare = plain.replace(/[^A-Za-z0-9]/g, "");
+  for (let i = 0; i + 32 <= bare.length; i++) {
+    const run = bare.slice(i, i + 32);
+    if (/^[0-9a-fA-F]{32}$/.test(run) && game.isLivePageTicket(run)) return true;
+  }
+  return false;
 }
 
 function buildMcp(
@@ -49,7 +65,7 @@ function buildMcp(
     if (carriesToken(text, token)) {
       throw new GameError("That text contains your player token. A token must never be sent to other players. Nothing was sent.", "token_in_text");
     }
-    if (carriesPageTicket(text)) {
+    if (carriesPageTicket(text, game)) {
       throw new GameError("That text contains a link to a player's page. Such a link is for its owner only. Nothing was sent.", "link_in_text");
     }
     return text;
@@ -160,7 +176,7 @@ function buildMcp(
     "A link to the owner's own web page: the hints about their gift, their guess, and after the reveal the table. The link is for the owner only, works once and expires in ten minutes. Give it to the owner exactly as returned. Never put it in a question, an answer or a hint.",
     {},
     () => {
-      if (!pageBase) throw new GameError("The host has not switched the players' page on.", "no_page");
+      if (!pageBase) throw new GameError("This server has no players' page.", "no_page");
       const ticket = game.issuePageTicket(tokenHash);
       return { link: `${pageBase}/me?t=${ticket}`, note: "For the owner only. It works once, within ten minutes. Opening it shows a button; the page opens when the owner presses it." };
     },
@@ -209,7 +225,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
   const board = (settings: BoardSettings): Response => {
     const t = now();
     if (!snapshot || t.getTime() - snapshot.taken.getTime() >= BOARD_REFRESH_MS) snapshot = { counts: game.boardCounts(), taken: t };
-    return new Response(renderBoard(snapshot.counts, settings, snapshot.taken), {
+    return new Response(renderBoard(snapshot.counts, settings, snapshot.taken, pageOn), {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
@@ -219,6 +235,8 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       },
     });
   };
+  // The players' page exists only with both the public address (for its links) and the board settings (for its dates).
+  const pageOn = Boolean(opts.publicUrl && opts.board);
   // A player's own page. Everything under /me is private: never cached, never indexed, no referrer.
   const COOKIE = "__Host-santa";
   const privatePage = (html: string, status = 200, extra: Record<string, string> = {}): Response =>
@@ -242,8 +260,17 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
     }
     return null;
   };
+  /** A form on another site must not be able to open or close a page in this browser. */
+  const fromElsewhere = (req: Request): boolean => {
+    const origin = req.headers.get("origin");
+    if (origin !== null && origin !== opts.publicUrl) return true;
+    const site = req.headers.get("sec-fetch-site");
+    return site !== null && site !== "same-origin" && site !== "none";
+  };
   const me = async (req: Request, url: URL, settings: BoardSettings): Promise<Response> => {
+    if (req.method === "POST" && fromElsewhere(req)) return privatePage(renderClosed("none"), 403);
     if (url.pathname === "/me/leave" && req.method === "POST") {
+      game.closePage(sessionOf(req)); // ends the session everywhere, not only in this browser
       return privatePage("", 303, { Location: "/board", "Set-Cookie": `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` });
     }
     if (url.pathname !== "/me") return privatePage(renderClosed("none"), 404);
@@ -256,7 +283,11 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       } catch {}
       const redeemed = game.redeemPageTicket(ticket);
       log(`page open ${redeemed ? "ok" : "refused"}`);
-      if (!redeemed) return privatePage(renderClosed("bad-link"), 403);
+      if (!redeemed) {
+        // Pressing the button again, or going back to it, with the page already open in this browser.
+        if (game.pageSession(sessionOf(req))) return privatePage("", 303, { Location: "/me" });
+        return privatePage(renderClosed("bad-link"), 403);
+      }
       return privatePage("", 303, {
         Location: "/me",
         "Set-Cookie": `${COOKIE}=${redeemed.session}; Path=/; Max-Age=${redeemed.maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`,
@@ -274,7 +305,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") return new Response("ok\n");
-    if ((url.pathname === "/me" || url.pathname.startsWith("/me/")) && opts.publicUrl && opts.board) return me(req, url, opts.board);
+    if ((url.pathname === "/me" || url.pathname.startsWith("/me/")) && pageOn && opts.board) return me(req, url, opts.board);
     if (url.pathname === "/board" && req.method === "GET" && opts.board) return board(opts.board);
     if (url.pathname === "/" && req.method === "GET") {
       return new Response(LANDING, { headers: { "Content-Type": "text/html; charset=utf-8" } });
@@ -290,7 +321,7 @@ export function createHandler(game: Game, log: (line: string) => void = () => {}
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    const mcp = buildMcp(game, tokenHash, log, tokenHash ? token : null, opts.publicUrl);
+    const mcp = buildMcp(game, tokenHash, log, tokenHash ? token : null, pageOn ? opts.publicUrl : undefined);
     await mcp.connect(transport);
     try {
       return await transport.handleRequest(req);

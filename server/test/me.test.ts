@@ -94,13 +94,18 @@ test("fetching the link uses nothing up; pressing the button opens the page, onc
   expect(page.status).toBe(200);
   expect(page.text).toContain("Hello, Ana");
   expect(b.cookie()).toMatch(/^__Host-santa=\d+\.\d+\.[0-9a-f]{64}$/);
-  // The same link in another browser: used.
+  // A double click sends the button twice within a moment: the second press must not lock the player out.
+  expect((await w.browser().open(link)).status).toBe(200);
+  // Later, the same link anywhere else: used.
+  w.wait(11_000);
   const second = await w.browser().open(link);
   expect(second.status).toBe(403);
   expect(second.text).toContain("already used or is too old");
   expect(second.text).not.toMatch(/Ana|Bo|Cy/);
-  // A reload keeps working on the cookie alone.
+  // A reload keeps working on the cookie alone, and so does pressing the old button again in this browser.
   expect((await b.send("GET", "/me")).text).toContain("Hello, Ana");
+  const again = await b.send("POST", "/me", { t: new URL(link).searchParams.get("t")! });
+  expect([again.status, again.headers.get("location")]).toEqual([303, "/me"]);
 });
 
 test("a link expires after ten minutes, a newer link replaces an older one, and nonsense opens nothing", async () => {
@@ -182,16 +187,22 @@ test("the page holds the hints about your gift and your guess, and none of the s
   expect(text).toContain("Your agent can still ask 4 questions.");
   // The roster is there, but nothing ties a name to a role.
   for (const n of ["Ana", "Bo", "Cy"]) expect(text).toContain(`>${n}</li>`);
-  for (const secret of ["SECRETQUESTION", "MYQUESTION", "MYHINT", "77.5", "@", "ana@example.org", "tok-a", "you give", "gives to", "You give"]) {
-    if (secret === "@") expect(text).not.toMatch(/[\w.]+@[\w-]+\.\w+/);
-    else expect(text).not.toContain(secret);
-  }
-  expect(JSON.stringify(w.game.playerPage(1))).not.toContain(receiver === "Ana" ? "never" : `"receiver"`);
-  expect(Object.keys(w.game.playerPage(1)!).sort()).toEqual(["guess", "hints", "name", "open", "phase", "players", "reveal"]);
-  // Before the reveal the page data names the Santa nowhere outside the roster.
+  for (const secret of ["SECRETQUESTION", "MYQUESTION", "MYHINT", "77.5", "ana@example.org", "tok-a"]) expect(text).not.toContain(secret);
+  expect(text).not.toMatch(/[\w.]+@[\w-]+\.\w+/); // nothing shaped like an address
+  // Who Ana gives to, and who her Santa is, appear in the roster and nowhere else: not in the page's
+  // data outside the list of players, and in the HTML only as one roster entry each.
   const data = w.game.playerPage(1)!;
+  expect(Object.keys(data).sort()).toEqual(["guess", "hints", "name", "open", "phase", "players", "reveal"]);
   expect(data.reveal).toBeNull();
-  expect(JSON.stringify(data.hints)).not.toContain(santa);
+  const { players, guess, ...rest } = data;
+  void players;
+  void guess; // Ana's own guess is a name she chose herself
+  for (const name of [receiver, santa]) {
+    expect(JSON.stringify(rest)).not.toContain(name);
+    const outsideGuess = text.replace(/You think your Santa is <strong>[^<]*<\/strong>/, "");
+    expect(outsideGuess.split(`>${name}<`).length - 1).toBe(1);
+    expect(outsideGuess.replace(`>${name}</li>`, "")).not.toContain(name);
+  }
 });
 
 test("in the lobby the page shows who has joined; after the reveal, your Santa and the table", async () => {
@@ -212,6 +223,7 @@ test("in the lobby the page shows who has joined; after the reveal, your Santa a
   expect(text).toContain(`<span class="big">${santa}</span>`);
   expect(text).toContain("You guessed right.");
   expect(text).toContain("Who gave to whom");
+  expect(text).toContain("who thought their Santa was");
   expect((text.match(/<tr><td>/g) ?? []).length).toBe(3);
   expect(text).toContain(`<td>${santa}</td><td>Ana</td><td class="right">${santa} ✓</td>`);
   expect(text).not.toContain("Still open");
@@ -278,6 +290,127 @@ test("the tool hands the link to its owner, and a link can never be relayed to o
     }
     expect(await call("Ana", "post_hint", { hint: "It is special, I promise." })).toContain('"posted": true');
     expect((await w.browser().open(reply.link)).status).toBe(200);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a link is tied to the installation that asked for it, even if the player's number is reused", async () => {
+  const w = world();
+  await w.join("tok-a", "Ana");
+  const old = w.link("tok-a");
+  w.game.removePlayer("Ana");
+  await w.join("tok-x", "Xena"); // SQLite hands the freed number to the next player
+  expect(w.game.playerPage(1)?.name).toBe("Xena");
+  expect((await w.browser().open(old)).status).toBe(403);
+  // A ticket row left behind for an installation that no longer is the player opens nothing either.
+  const w2 = await threePlaying();
+  const stale = w2.link("tok-a");
+  w2.wait(61_000);
+  const ref = (await w2.game.requestJoin("tok-a2", "Ana", 20, "ana@example.org", "elf")).request_ref;
+  w2.game.adminConfirm("ana@example.org", ref, { rebind: true });
+  // Put the old ticket back as if it had been written a moment after the recovery.
+  const db = (w2.game as unknown as { db: Database }).db;
+  const { createHash } = await import("node:crypto");
+  db.query("INSERT OR REPLACE INTO page_tickets (player_id, ticket_hash, token_hash, expires_at, used) VALUES (1, ?, 'tok-a', ?, 0)").run(
+    createHash("sha256").update(new URL(stale).searchParams.get("t")!).digest("hex"),
+    Date.parse("2027-01-01T00:00:00Z"),
+  );
+  expect((await w2.browser().open(stale)).status).toBe(403);
+});
+
+test("closing the page ends it in every browser, and takes any unused link with it", async () => {
+  const w = await threePlaying();
+  const laptop = w.browser();
+  const phone = w.browser();
+  await laptop.open(w.link("tok-a"));
+  w.wait(11_000);
+  await phone.open(w.link("tok-a"));
+  const unused = w.link("tok-a");
+  expect((await phone.send("GET", "/me")).status).toBe(200);
+  expect((await laptop.send("POST", "/me/leave")).status).toBe(303);
+  expect((await phone.send("GET", "/me")).status).toBe(401);
+  expect((await w.browser().open(unused)).status).toBe(403);
+  // Someone else's page is untouched, and a new link works again.
+  const bo = w.browser();
+  expect((await bo.open(w.link("tok-b"))).status).toBe(200);
+  expect((await w.browser().open(w.link("tok-a"))).status).toBe(200);
+  expect((await bo.send("GET", "/me")).status).toBe(200);
+});
+
+test("a form on another site can neither open nor close a page here", async () => {
+  const w = await threePlaying();
+  const b = w.browser();
+  await b.open(w.link("tok-a"));
+  const cookie = b.cookie();
+  const post = (path: string, headers: Record<string, string>, body = "") =>
+    w.handler(new Request(`${BASE}${path}`, { method: "POST", body, headers: { cookie, "content-type": "application/x-www-form-urlencoded", ...headers } }));
+  const ticket = new URL(w.link("tok-b")).searchParams.get("t")!;
+  expect((await post("/me/leave", { origin: "https://evil.example" })).status).toBe(403);
+  expect((await post("/me/leave", { "sec-fetch-site": "cross-site" })).status).toBe(403);
+  expect((await post("/me", { origin: "https://evil.example" }, `t=${ticket}`)).status).toBe(403);
+  expect((await b.send("GET", "/me")).text).toContain("Hello, Ana"); // still open, still Ana's
+  expect((await post("/me", { origin: BASE, "sec-fetch-site": "same-origin" }, `t=${ticket}`)).status).toBe(303);
+});
+
+test("a link cannot be relayed however it is dressed up; text that only looks like one is fine", async () => {
+  const w = await threePlaying();
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: w.handler });
+  const token = "A".repeat(40);
+  const call = async (tool: string, args: Record<string, unknown> = {}) => {
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+    try {
+      const r = (await client.callTool({ name: tool, arguments: args })) as { isError?: boolean; content: { text: string }[] };
+      return r.isError ? `error: ${r.content[0]!.text}` : r.content[0]!.text;
+    } finally {
+      await client.close();
+    }
+  };
+  try {
+    w.wait(61_000);
+    w.game.adminConfirm("ana@example.org", JSON.parse(await call("join", { name: "Ana", budget: 20, email: "ana@example.org", invite_code: "elf" })).request_ref, { rebind: true });
+    const link: string = JSON.parse(await call("my_page")).link;
+    const hex = link.slice(-32);
+    const disguises = [
+      link.replace("spg_", "spg%5F"), // percent-encoded underscore, which a browser decodes
+      hex, // without the prefix
+      hex.toUpperCase(),
+      hex.split("").join("+"),
+      hex.split("").join("\u200b"), // zero-width spaces
+      hex.match(/.{4}/g)!.join(" * "),
+      encodeURIComponent(encodeURIComponent(link)),
+    ];
+    for (const text of disguises) expect(await call("post_hint", { hint: text.slice(0, 200) }), text).toMatch(/contains a link to a player's page/);
+    // Another player's live ticket is refused as well: the check is on the ticket, not on who sends it.
+    const bosTicket = new URL(w.link("tok-b")).searchParams.get("t")!;
+    expect(await call("ask", { question: `psst ${bosTicket}` })).toMatch(/contains a link to a player's page/);
+    // Long hexadecimal text that is not a ticket, and a ticket that has run out, are ordinary text.
+    expect(await call("ask", { question: `checksum ${"0123456789abcdef".repeat(2)} ok?` })).toContain('"sent": true');
+    w.wait(11 * 60_000);
+    expect(await call("post_hint", { hint: `old news ${hex}` })).toContain('"posted": true');
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the page is offered only where it exists", async () => {
+  const w = await threePlaying();
+  const boardOf = async (handler: (r: Request) => Promise<Response>) => (await handler(new Request(`${BASE}/board`))).text();
+  expect(await boardOf(w.handler)).toContain("Ask your agent for your own page");
+  const withoutAddress = createHandler(w.game, () => {}, { board: settings });
+  expect(await boardOf(withoutAddress)).not.toContain("your own page");
+  // An address without the board settings is not enough either: no route, and so no link from the tool.
+  const withoutBoard = createHandler(w.game, () => {}, { publicUrl: BASE });
+  expect((await withoutBoard(new Request(`${BASE}/me`))).status).toBe(404);
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: withoutBoard });
+  try {
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${"Q".repeat(40)}` } } }));
+    const r = (await client.callTool({ name: "my_page", arguments: {} })) as { isError?: boolean; content: { text: string }[] };
+    await client.close();
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/not joined|no players' page/);
   } finally {
     server.stop(true);
   }

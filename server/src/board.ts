@@ -107,7 +107,7 @@ export function dateTable(s: BoardSettings, now: Date): string {
     : `<p class="quiet">The host has not announced the dates yet.</p>`;
 }
 
-export function renderBoard(c: BoardCounts, s: BoardSettings, now: Date): string {
+export function renderBoard(c: BoardCounts, s: BoardSettings, now: Date, playersPage = false): string {
   const at = PHASES.findIndex((p) => p.key === c.phase);
   const steps = phaseSteps(c.phase);
 
@@ -155,8 +155,7 @@ ${PAGE_STYLE}</style>
 ${dateRows}
 
 <h2>Good to know</h2>
-<p class="quiet">Every player sets their own budget, from ${esc(s.minBudget)} ${esc(s.currency)} upwards. This page shows numbers only: no names, no hints and no gifts. It is renewed every five minutes; these numbers are from ${esc(stamp)} UTC.</p>
-<p class="quiet">Playing? Ask your agent for your own page: it shows the hints about your gift.</p>
+<p class="quiet">Every player sets their own budget, from ${esc(s.minBudget)} ${esc(s.currency)} upwards. This page shows numbers only: no names, no hints and no gifts. It is renewed every five minutes; these numbers are from ${esc(stamp)} UTC.</p>${playersPage ? '\n<p class="quiet">Playing? Ask your agent for your own page: it shows the hints about your gift.</p>' : ""}
 
 <footer><a href="/">What this server is</a> · <a href="https://github.com/amazarache/ssanta">How to play</a></footer>
 </main>

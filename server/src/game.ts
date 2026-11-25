@@ -69,6 +69,8 @@ const REF_RE = /^[0-9A-HJKMNP-TV-Z]{6}$/;
 export const PAGE_TICKET_PREFIX = "spg_";
 const PAGE_TICKET_TTL_MS = 10 * 60 * 1000;
 const PAGE_SESSION_TTL_MS = 8 * 3600 * 1000;
+const PAGE_DOUBLE_CLICK_MS = 10 * 1000;
+const PAGE_TICKET_RE = /^spg_[0-9a-f]{32}$/;
 
 export const LIMITS = {
   minPlayers: 4,
@@ -249,13 +251,18 @@ export class Game {
       CREATE TABLE IF NOT EXISTS page_tickets (
         player_id INTEGER PRIMARY KEY REFERENCES players(id),
         ticket_hash TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        token_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
       );
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
+    const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+
+    // Bumped when a player closes their page, which ends every session of theirs.
+    if (!columns("players").includes("page_epoch")) db.exec("ALTER TABLE players ADD COLUMN page_epoch INTEGER NOT NULL DEFAULT 0");
     db.query("INSERT OR IGNORE INTO meta (key, value) VALUES ('page_key', ?)").run(randomBytes(32).toString("hex"));
     this.pageKey = (db.query("SELECT value FROM meta WHERE key = 'page_key'").get() as { value: string }).value;
-    const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 
     // A player's address is kept as a keyed fingerprint only: enough to recognise the address when it comes
     // back, not enough to read it. Earlier versions had no column for it at all, and then a readable one.
@@ -826,47 +833,77 @@ export class Game {
   // ---- the player's own web page ----
 
   /**
-   * A fresh ticket for the caller's page. It replaces any earlier unused one, works once and expires in
-   * ten minutes. Only its hash is stored. The caller must be a player.
+   * A fresh ticket for the caller's page. It replaces any earlier one, works once and expires in ten
+   * minutes. Only its hash is stored, together with the installation that asked: a ticket is worthless
+   * once the player has moved to another installation or has been removed.
    */
   issuePageTicket(tokenHash: string): string {
-    const me = this.player(tokenHash);
-    const ticket = PAGE_TICKET_PREFIX + randomBytes(16).toString("hex");
-    const hash = createHash("sha256").update(ticket).digest("hex");
-    this.db
-      .query(
-        `INSERT INTO page_tickets (player_id, ticket_hash, expires_at) VALUES (?, ?, ?)
-         ON CONFLICT(player_id) DO UPDATE SET ticket_hash = excluded.ticket_hash, expires_at = excluded.expires_at`,
-      )
-      .run(me.id, hash, this.now().getTime() + PAGE_TICKET_TTL_MS);
-    return ticket;
+    return this.tx(() => {
+      const me = this.player(tokenHash);
+      const ticket = PAGE_TICKET_PREFIX + randomBytes(16).toString("hex");
+      this.db
+        .query(
+          `INSERT INTO page_tickets (player_id, ticket_hash, token_hash, expires_at, used) VALUES (?, ?, ?, ?, 0)
+           ON CONFLICT(player_id) DO UPDATE SET ticket_hash = excluded.ticket_hash, token_hash = excluded.token_hash,
+             expires_at = excluded.expires_at, used = 0`,
+        )
+        .run(me.id, this.ticketHash(ticket), tokenHash, this.now().getTime() + PAGE_TICKET_TTL_MS);
+      return ticket;
+    });
   }
 
-  /** Trades a ticket for a session, once. Returns the cookie value and its lifetime, or null. */
+  private ticketHash(ticket: string): string {
+    return createHash("sha256").update(ticket).digest("hex");
+  }
+
+  /** True if these 32 hexadecimal characters are the body of a ticket that could still open a page. */
+  isLivePageTicket(hex32: string): boolean {
+    return (
+      this.db
+        .query("SELECT 1 FROM page_tickets WHERE ticket_hash = ? AND expires_at >= ?")
+        .get(this.ticketHash(PAGE_TICKET_PREFIX + hex32.toLowerCase()), this.now().getTime()) !== null
+    );
+  }
+
+  /**
+   * Trades a ticket for a session. Returns the cookie value and its lifetime, or null.
+   * A ticket works once; for a few seconds after that it works again, because a double click on the
+   * button sends the request twice and the browser keeps only the second answer.
+   */
   redeemPageTicket(ticket: string): { session: string; maxAgeSeconds: number } | null {
-    if (typeof ticket !== "string" || !ticket.startsWith(PAGE_TICKET_PREFIX) || ticket.length > 80) return null;
-    const hash = createHash("sha256").update(ticket).digest("hex");
+    if (typeof ticket !== "string" || !PAGE_TICKET_RE.test(ticket)) return null;
+    const hash = this.ticketHash(ticket);
+    // A plain read first: a request with a made-up ticket must not take the database's write lock.
+    if (!this.db.query("SELECT 1 FROM page_tickets WHERE ticket_hash = ?").get(hash)) return null;
     return this.tx(() => {
       const now = this.now().getTime();
-      this.db.query("DELETE FROM page_tickets WHERE expires_at < ?").run(now);
-      const row = this.db.query("SELECT player_id FROM page_tickets WHERE ticket_hash = ?").get(hash) as { player_id: number } | null;
-      if (!row) return null;
-      this.db.query("DELETE FROM page_tickets WHERE player_id = ?").run(row.player_id);
-      const player = this.db.query("SELECT id, token_hash FROM players WHERE id = ?").get(row.player_id) as
-        | { id: number; token_hash: string }
-        | null;
-      if (!player) return null;
+      const row = this.db
+        .query(
+          `SELECT t.player_id, t.used, p.token_hash, p.page_epoch FROM page_tickets t JOIN players p ON p.id = t.player_id
+           WHERE t.ticket_hash = ? AND t.expires_at >= ? AND t.token_hash = p.token_hash`,
+        )
+        .get(hash, now) as { player_id: number; used: number; token_hash: string; page_epoch: number } | null;
+      if (!row) {
+        this.db.query("DELETE FROM page_tickets WHERE ticket_hash = ? OR expires_at < ?").run(hash, now);
+        return null;
+      }
+      if (!row.used) {
+        this.db.query("UPDATE page_tickets SET used = 1, expires_at = ? WHERE player_id = ?").run(now + PAGE_DOUBLE_CLICK_MS, row.player_id);
+      }
       const expires = now + PAGE_SESSION_TTL_MS;
-      return { session: `${player.id}.${expires}.${this.signSession(player.id, expires, player.token_hash)}`, maxAgeSeconds: PAGE_SESSION_TTL_MS / 1000 };
+      return {
+        session: `${row.player_id}.${expires}.${this.signSession(row.player_id, expires, row.token_hash, row.page_epoch)}`,
+        maxAgeSeconds: PAGE_SESSION_TTL_MS / 1000,
+      };
     });
   }
 
   /**
-   * The signature covers the player's current token hash. So a session ends by itself when the player is
-   * removed, or when they recover with a new installation: whoever held the old one is out.
+   * The signature covers the player's current token hash and a counter. So a session ends by itself when
+   * the player is removed, when they recover with a new installation, and when they close their page.
    */
-  private signSession(playerId: number, expires: number, tokenHash: string): string {
-    return createHmac("sha256", this.pageKey).update(`${playerId}.${expires}.${tokenHash}`).digest("hex");
+  private signSession(playerId: number, expires: number, tokenHash: string, epoch: number): string {
+    return createHmac("sha256", this.pageKey).update(`${playerId}.${expires}.${tokenHash}.${epoch}`).digest("hex");
   }
 
   /** The player a session cookie belongs to, or null if it is forged, expired or no longer theirs. */
@@ -876,13 +913,23 @@ export class Game {
     const id = Number(m[1]);
     const expires = Number(m[2]);
     if (expires <= this.now().getTime()) return null;
-    const player = this.db.query("SELECT id, name, token_hash FROM players WHERE id = ?").get(id) as
-      | (Player & { token_hash: string })
+    const player = this.db.query("SELECT id, name, token_hash, page_epoch FROM players WHERE id = ?").get(id) as
+      | (Player & { token_hash: string; page_epoch: number })
       | null;
     if (!player) return null;
-    const expected = Buffer.from(this.signSession(id, expires, player.token_hash), "hex");
+    const expected = Buffer.from(this.signSession(id, expires, player.token_hash, player.page_epoch), "hex");
     if (!timingSafeEqual(expected, Buffer.from(m[3]!, "hex"))) return null;
     return { id: player.id, name: player.name, expires };
+  }
+
+  /** Ends every open page of the player this session belongs to, in every browser, and any unused link. */
+  closePage(session: string | null | undefined): void {
+    const s = this.pageSession(session);
+    if (!s) return;
+    this.tx(() => {
+      this.db.query("UPDATE players SET page_epoch = page_epoch + 1 WHERE id = ?").run(s.id);
+      this.db.query("DELETE FROM page_tickets WHERE player_id = ?").run(s.id);
+    });
   }
 
   /**

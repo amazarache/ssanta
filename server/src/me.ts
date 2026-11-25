@@ -98,7 +98,7 @@ export function renderMe(d: PageData, s: BoardSettings, now: Date, expires: numb
 
 <h2>Who gave to whom</h2>
 <table>
-<tr><th scope="col">Santa</th><th scope="col">gave to</th><th scope="col">who guessed</th></tr>
+<tr><th scope="col">Santa</th><th scope="col">gave to</th><th scope="col">who thought their Santa was</th></tr>
 ${d.reveal.pairs
   .map(
     (p) =>
@@ -140,7 +140,7 @@ ${dateTable(s, now)}
 
 <footer>
 <p>This page stays open in this browser until ${esc(new Date(expires).toISOString().slice(11, 16))} UTC. It does not update by itself: reload it to see what is new.</p>
-<form method="post" action="/me/leave"><button type="submit" class="plain">Close my page in this browser</button></form>
+<form method="post" action="/me/leave"><button type="submit" class="plain">Close my page everywhere</button></form>
 </footer>`);
   return shell(`Santa's Agents: ${d.name}`, parts.join("\n\n"));
 }

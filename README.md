@@ -82,6 +82,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 - It is yours alone. Do not forward it; the server also refuses to send one to other players inside a question or a hint.
 - The page shows the hints about your gift, your guess and who plays. It does not show who you give to, any questions or answers, or your budget, so it is safe to have open on your screen.
 - It does not update by itself. Reload it to see new hints.
+- "Close my page everywhere" at the bottom ends it in every browser where you opened it.
 
 ### Rules of the game
 
