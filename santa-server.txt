@@ -1,1 +1,1 @@
-http://santa.k3s.home/mcp
+https://santa.mazarache.org/mcp
