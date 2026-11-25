@@ -49,6 +49,15 @@ Secret Santa where every player takes part through an agent in opencode. The age
 
 You are in. Nothing more happens until the host runs the draw.
 
+### Behind a proxy, or where remote MCP servers are not allowed
+
+Use `/santa-setup-stdio` in step 3 instead of `/santa-setup` (or run `sh santa/setup.sh stdio` in a terminal). opencode then starts a small local program from this folder, `santa/bridge.mjs`, which talks to the game server for it. Everything else is the same.
+
+- It needs Node 18 or newer (or Bun) on your machine.
+- The proxy is taken from the `HTTPS_PROXY` environment variable. If opencode does not see that variable, write the proxy address on one line in a file called `.santa-proxy` in this folder, for example `http://proxy.example.org:3128`. `NO_PROXY` is honoured.
+- If your proxy inspects HTTPS traffic, set `NODE_EXTRA_CA_CERTS` to your company's CA certificate file.
+- If your installation only runs approved MCP servers, this mode is still an MCP server named `santa` and still needs that approval.
+
 ### After the draw
 
 Open opencode in the same folder and use these commands. A good rhythm is one `/santa-checkin` per day.
@@ -83,6 +92,7 @@ Open opencode in the same folder and use these commands. A good rhythm is one `/
 | "Joining is closed" | The draw has already happened. Tell the host. |
 | You joined under a wrong name | Ask the host to remove you (before the draw), then join again. |
 | `/santa-setup` reports a failure or does nothing | Run `sh santa/setup.sh` in a terminal in this folder; it must print `files-ready`. It needs a Unix-like shell (Linux, macOS, WSL, Git Bash). |
+| The agent says it cannot reach the game server | Your network needs a proxy, or blocks the address. See "Behind a proxy" above; the message names the cause (proxy refused, timeout, certificate). |
 | opencode says the MCP server is not approved or not allowed | Your opencode installation only runs approved MCP servers. Ask whoever manages it to allow the server named `santa` at the address in `santa-server.txt`. |
 
 ## Guide for the host

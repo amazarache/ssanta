@@ -109,3 +109,26 @@ test("the root address describes the service", async () => {
   expect(await res.text()).toContain("Secret Santa");
   expect((await fetch(`http://127.0.0.1:${server.port}/robots.txt`)).status).toBe(200);
 });
+
+test("the stdio bridge relays MCP messages to the server", async () => {
+  const proc = Bun.spawn(["node", new URL("../../santa/bridge.mjs", import.meta.url).pathname], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { PATH: process.env.PATH ?? "", SANTA_URL: `http://127.0.0.1:${server.port}/mcp`, NO_PROXY: "*" },
+  });
+  proc.stdin.write(
+    [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    ]
+      .map((m) => JSON.stringify(m))
+      .join("\n") + "\n",
+  );
+  proc.stdin.end();
+  const replies = (await new Response(proc.stdout).text()).trim().split("\n").map((l) => JSON.parse(l));
+  expect(replies.map((r) => r.id)).toEqual([1, 2]);
+  expect(replies[0].result.serverInfo.name).toBe("secret-santa");
+  expect(replies[1].result.tools.length).toBeGreaterThan(10);
+});

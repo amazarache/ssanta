@@ -1,6 +1,7 @@
 #!/bin/sh
 # Creates the player's private files. Safe to run again: it never overwrites the token or the vibe file.
-# Run from the repository root: sh santa/setup.sh
+# Run from the repository root: sh santa/setup.sh          (opencode connects to the game server itself)
+#                           or: sh santa/setup.sh stdio    (through the local bridge, which honours an HTTP proxy)
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -15,7 +16,24 @@ if [ ! -s .santa-token ]; then
   (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > .santa-token)
 fi
 [ -f vibe.md ] || cp vibe.example.md vibe.md
-cp "santa/mcp.$v.json" opencode.json
+
+# Mode "stdio": opencode starts santa/bridge.mjs locally and the bridge talks to the game server,
+# through the configured HTTP proxy if there is one. Default mode: opencode connects to the server itself.
+mode=${1:-remote}
+if [ "$mode" = stdio ]; then
+  if command -v node >/dev/null 2>&1; then run=node
+  elif command -v bun >/dev/null 2>&1; then run=bun
+  else echo "setup-failed: stdio mode needs Node 18+ or Bun on this machine"; exit 1
+  fi
+  if [ "$v" = v1 ]; then
+    printf '{\n  "mcp": {\n    "santa": { "type": "local", "command": ["%s", "santa/bridge.mjs"], "enabled": true }\n  }\n}\n' "$run" > opencode.json
+  else
+    printf '{\n  "mcp": {\n    "servers": {\n      "santa": { "type": "local", "command": ["%s", "santa/bridge.mjs"] }\n    }\n  }\n}\n' "$run" > opencode.json
+  fi
+else
+  mode=remote
+  cp "santa/mcp.$v.json" opencode.json
+fi
 mkdir -p .opencode/agents
 { echo '---'; cat "santa/elf.$v.yml"; echo '---'; cat santa/elf.md; } > .opencode/agents/elf.md
-echo "files-ready ($v)"
+echo "files-ready ($v, $mode)"
