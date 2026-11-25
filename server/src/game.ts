@@ -9,7 +9,7 @@
 // transaction (see tx), so the two can never interleave inside it.
 
 import type { Database } from "bun:sqlite";
-import { createHash, randomInt, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { MailError, type Mailer } from "./mail.ts";
 
 export class GameError extends Error {
@@ -149,6 +149,8 @@ export class Game {
   private mailDailyCap: number;
   private maxPending: number;
   private log: (line: string) => void;
+  /** Key for address fingerprints. Lives in the database, so it protects against reading, not against guessing. */
+  private emailKey = "";
 
   constructor(
     private db: Database,
@@ -167,12 +169,24 @@ export class Game {
     this.maxPending = opts.maxPending ?? Math.max(50, 3 * this.maxPlayers);
     this.log = opts.log ?? (() => {});
     if (!Number.isFinite(this.minBudget) || this.minBudget < 0) throw new Error("minBudget must be a number, 0 or more.");
-    db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.tx(() => this.migrate());
+    // secure_delete: a deleted join request leaves no readable address behind in the file.
+    db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;");
+    const hadReadableAddresses = this.tx(() => this.migrate());
+    if (hadReadableAddresses) {
+      // Rewrite the file once, so the addresses that were just replaced by fingerprints are gone from its unused pages too.
+      try {
+        db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
+      } catch {
+        // Another process holds the file. The rows are converted either way; only old page content may linger.
+      }
+    }
   }
 
-  /** Creates the tables and brings a database made by an earlier version up to date. Safe to run on every start. */
-  private migrate(): void {
+  /**
+   * Creates the tables and brings a database made by an earlier version up to date. Safe to run on every start.
+   * Returns true if it found addresses stored in readable form and replaced them.
+   */
+  private migrate(): boolean {
     const db = this.db;
     db.exec(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -182,7 +196,7 @@ export class Game {
         name_key TEXT NOT NULL UNIQUE,
         token_hash TEXT NOT NULL UNIQUE,
         budget REAL NOT NULL,
-        email TEXT
+        email_fp TEXT
       );
       CREATE TABLE IF NOT EXISTS assignments (
         giver_id INTEGER PRIMARY KEY REFERENCES players(id),
@@ -221,14 +235,28 @@ export class Game {
         requested_at INTEGER NOT NULL DEFAULT 0
       );
       -- One row per decision to send a confirmation mail. Only used for the sending limits.
-      CREATE TABLE IF NOT EXISTS mail_log (email TEXT NOT NULL, sent_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS mail_log (email_fp TEXT NOT NULL, sent_at INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta (key, value) VALUES ('phase', 'lobby');
     `);
     const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 
-    // Before email confirmation, players had no email column.
-    if (!columns("players").includes("email")) db.exec("ALTER TABLE players ADD COLUMN email TEXT");
-    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS players_email ON players(email) WHERE email IS NOT NULL");
+    // A player's address is kept as a keyed fingerprint only: enough to recognise the address when it comes
+    // back, not enough to read it. Earlier versions had no column for it at all, and then a readable one.
+    const playerColumns = columns("players");
+    if (playerColumns.includes("email")) db.exec("ALTER TABLE players RENAME COLUMN email TO email_fp");
+    else if (!playerColumns.includes("email_fp")) db.exec("ALTER TABLE players ADD COLUMN email_fp TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS players_email ON players(email_fp) WHERE email_fp IS NOT NULL");
+    db.query("INSERT OR IGNORE INTO meta (key, value) VALUES ('email_key', ?)").run(randomBytes(32).toString("hex"));
+    this.emailKey = (db.query("SELECT value FROM meta WHERE key = 'email_key'").get() as { value: string }).value;
+    // A fingerprint is hexadecimal, so an "@" marks a value that is still a readable address.
+    const readable = db.query("SELECT id, email_fp FROM players WHERE email_fp LIKE '%@%'").all() as { id: number; email_fp: string }[];
+    for (const p of readable) db.query("UPDATE players SET email_fp = ? WHERE id = ?").run(this.fingerprint(p.email_fp), p.id);
+    let cleaned = readable.length > 0;
+    if (columns("mail_log").includes("email")) {
+      db.exec("ALTER TABLE mail_log RENAME COLUMN email TO email_fp");
+      // These only feed the sending limits. Dropping them resets the limits once, which is harmless.
+      cleaned = db.query("DELETE FROM mail_log WHERE email_fp LIKE '%@%'").run().changes > 0 || cleaned;
+    }
 
     // Before confirmation by reference, requests had no reference and no request time.
     if (!columns("registrations").includes("ref")) {
@@ -250,7 +278,11 @@ export class Game {
     }
 
     // One earlier version counted join attempts in a table of their own. Requests are now always recorded instead.
-    db.exec("DROP TABLE IF EXISTS join_attempts");
+    if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'join_attempts'").get()) {
+      db.exec("DROP TABLE join_attempts");
+      cleaned = true;
+    }
+    return cleaned;
   }
 
   // ---- helpers ----
@@ -275,8 +307,12 @@ export class Game {
     return p;
   }
 
+  private fingerprint(email: string): string {
+    return createHmac("sha256", this.emailKey).update(email).digest("hex");
+  }
+
   private playerByEmail(email: string): Player | null {
-    return this.db.query("SELECT id, name FROM players WHERE email = ?").get(email) as Player | null;
+    return this.db.query("SELECT id, name FROM players WHERE email_fp = ?").get(this.fingerprint(email)) as Player | null;
   }
 
   private requirePhase(wanted: Phase): void {
@@ -342,8 +378,8 @@ export class Game {
       throw new GameError(`The name ${name} is taken. Change it in vibe.md and run /santa-join again.`, "name_taken");
     }
     this.db
-      .query("INSERT INTO players (name, name_key, token_hash, budget, email) VALUES (?, ?, ?, ?, ?)")
-      .run(name, name.toLowerCase(), tokenHash, budget, email);
+      .query("INSERT INTO players (name, name_key, token_hash, budget, email_fp) VALUES (?, ?, ?, ?, ?)")
+      .run(name, name.toLowerCase(), tokenHash, budget, email === null ? null : this.fingerprint(email));
     return total + 1;
   }
 
@@ -365,13 +401,14 @@ export class Game {
   /** The sending limit that applies to this address right now, or null. */
   private mailLimit(email: string, now: number): { reason: string; message: string } | null {
     const dayStart = Date.parse(`${this.today()}T00:00:00Z`);
-    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at > ?", email, now - MAIL_COOLDOWN_MS) > 0) {
+    const fp = this.fingerprint(email);
+    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email_fp = ? AND sent_at > ?", fp, now - MAIL_COOLDOWN_MS) > 0) {
       return {
         reason: "mail_cooldown",
         message: "A code was sent to this address less than a minute ago. Check the inbox and the spam folder, or wait a minute.",
       };
     }
-    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email = ? AND sent_at >= ?", email, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
+    if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE email_fp = ? AND sent_at >= ?", fp, dayStart) >= MAIL_PER_ADDRESS_PER_DAY) {
       return { reason: "mail_address_limit", message: "Too many codes were sent to this address today, so no new one goes out until tomorrow." };
     }
     if (this.count("SELECT COUNT(*) AS c FROM mail_log WHERE sent_at >= ?", dayStart) >= this.mailDailyCap) {
@@ -439,7 +476,7 @@ export class Game {
       const usable = lobby || this.playerByEmail(e) !== null;
       const code = String(this.rand(1_000_000)).padStart(6, "0");
       this.saveRequest(tokenHash, e, n, b, ref, now, usable ? this.codeHash(tokenHash, code) : NO_CODE, now + CODE_TTL_MS);
-      this.db.query("INSERT INTO mail_log (email, sent_at) VALUES (?, ?)").run(e, now);
+      this.db.query("INSERT INTO mail_log (email_fp, sent_at) VALUES (?, ?)").run(this.fingerprint(e), now);
       return { ref, limit: null, code: usable ? code : null, lobby };
     });
 
@@ -797,7 +834,7 @@ export class Game {
       const e = email.trim().toLowerCase();
       const n = this.db.query("DELETE FROM registrations WHERE email = ?").run(e).changes;
       if (n === 0) throw new GameError("Nothing is pending for that address. Check the spelling against the pending list.");
-      this.db.query("DELETE FROM mail_log WHERE email = ?").run(e);
+      this.db.query("DELETE FROM mail_log WHERE email_fp = ?").run(this.fingerprint(e));
       return n;
     });
   }

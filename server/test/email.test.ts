@@ -1,5 +1,8 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Game, type GameOptions } from "../src/game.ts";
 import { cloudflareMailer, MailError } from "../src/mail.ts";
 
@@ -524,6 +527,56 @@ describe("privacy", () => {
   });
 });
 
+/** Every byte SQLite keeps for a database: the file and its write-ahead log. */
+function onDisk(path: string): string {
+  return [path, `${path}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+}
+
+describe("addresses at rest", () => {
+  test("a player's address is kept as a fingerprint, the mail log too; only a waiting request holds it readable", async () => {
+    const { game, db, ask, signUp } = setup();
+    await signUp("t1", "Ana", "ana@example.org");
+    await ask("t2", "Bo", "bo@example.org");
+    const dump = (table: string) => JSON.stringify(db.query(`SELECT * FROM ${table}`).all());
+    expect(dump("players")).not.toContain("@");
+    expect(dump("mail_log")).not.toContain("@");
+    expect(dump("players")).toMatch(/"email_fp":"[0-9a-f]{64}"/);
+    expect(dump("registrations")).toContain("bo@example.org");
+    expect(dump("registrations")).not.toContain("ana@example.org");
+    // The fingerprint still does its job: the address is recognised when it comes back.
+    expect(game.adminPending().requests[0]!.note).toBe("");
+    await ask("t3", "Ana again", "ana@example.org").catch(() => {});
+    expect(game.adminPending().requests.find((r) => r.email === "ana@example.org")!.note).toMatch(/already plays as Ana/);
+  });
+
+  test("once a request is confirmed, its address is gone from the file itself", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "santa-")), "s.db");
+    const db = new Database(path);
+    const sent: string[] = [];
+    const game = new Game(db, { inviteCode: INVITE, mailer: async (_to, code) => void sent.push(code) });
+    await game.requestJoin("t1", "Ana", 20, "ana.unique.marker@example.org", INVITE);
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    expect(onDisk(path)).toContain("ana.unique.marker@example.org");
+    game.confirm("t1", sent[0]!);
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    expect(onDisk(path)).not.toContain("ana.unique.marker");
+    expect(game.status("t1").you).toBe("Ana");
+  });
+
+  test("two connections to one file agree on the fingerprints", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "santa-")), "s.db");
+    const sent: string[] = [];
+    const opts = { inviteCode: INVITE, mailer: async (_to: string, code: string) => void sent.push(code) };
+    const server = new Game(new Database(path), opts);
+    const admin = new Game(new Database(path), opts); // as the admin command does
+    await server.requestJoin("t1", "Ana", 20, "ana@example.org", INVITE);
+    server.confirm("t1", sent[0]!);
+    const ref = (await server.requestJoin("t2", "X", 20, "ana@example.org", INVITE).catch((e: Error) => ({ request_ref: refIn(e.message) }))).request_ref;
+    expect(admin.adminPending().requests[0]!.note).toMatch(/already plays as Ana/);
+    expect(() => admin.adminConfirm("ana@example.org", ref)).toThrow(/already plays as Ana/);
+  });
+});
+
 describe("databases made by earlier versions", () => {
   test("from before email confirmation", () => {
     const db = new Database(":memory:");
@@ -537,7 +590,9 @@ describe("databases made by earlier versions", () => {
   });
 
   test("from the version that confirmed by address alone", async () => {
-    const db = new Database(":memory:");
+    const path = join(mkdtempSync(join(tmpdir(), "santa-")), "old.db");
+    const db = new Database(path);
+    db.exec("PRAGMA journal_mode = WAL");
     const t0 = Date.parse("2026-12-01T10:00:00Z");
     db.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -561,6 +616,10 @@ describe("databases made by earlier versions", () => {
     open(); // a second start changes nothing more
 
     expect(game.status("maza-token")).toMatchObject({ you: "MAZA", your_budget: 30 });
+    // The player's address was readable in the old file. Now it is a fingerprint, and the old bytes are gone too.
+    expect(JSON.stringify(db.query("SELECT * FROM players").all())).not.toContain("@");
+    expect(JSON.stringify(db.query("SELECT * FROM mail_log").all())).not.toContain("@");
+    expect(onDisk(path)).not.toContain("maza@example.org");
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'join_attempts'").get()).toBeNull();
     // The request that was waiting is still there, five minutes old, and now has a reference.
     expect(game.adminPending().requests).toEqual([{ email: "ana@example.org", requested_name: "Ana", minutes_ago: 5, note: "" }]);

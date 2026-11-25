@@ -253,6 +253,6 @@ The admin command reads the same variables, so run it in the same environment as
 
 - Players and their agents see only their own receiver. Questions and hints carry no sender.
 - A player's budget is never shown to another player, before or after the reveal.
-- A player's email address is stored on the server and shown only to the host (`admin pending`). It appears in no player-facing output and in no log.
+- A player's email address is readable on the server only while their join request waits (7 days at most), where the host sees it with `admin pending`. Once the player is in, the server keeps only a keyed fingerprint of it: enough to recognise the address if they need to recover a lost token, not enough to read it back. Whoever has the database file can still test a guessed address against the fingerprints. The address appears in no player-facing output and in no log.
 - No tool, log line or admin command shows who gives to whom before the reveal.
 - The pairs are stored in the SQLite file on the server. Whoever can open that file can read them, so the host must not look.
