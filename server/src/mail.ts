@@ -25,11 +25,11 @@ export function cloudflareMailer(opts: CloudflareMailOptions): Mailer {
   return async (to, code) => {
     const text =
       `Your Secret Santa confirmation code is ${code}\n\n` +
-      `It expires in 15 minutes. In opencode, run:\n\n    /santa-confirm ${code}\n\n` +
+      `It expires in 15 minutes. Give it to your AI agent and ask it to confirm your Secret Santa request.\nIn opencode: /santa-confirm ${code}\n\n` +
       `If you did not ask to join, ignore this email.\n`;
     const html =
       `<p>Your Secret Santa confirmation code is</p><p style="font-size:28px;letter-spacing:4px"><b>${code}</b></p>` +
-      `<p>It expires in 15 minutes. In opencode, run <code>/santa-confirm ${code}</code></p>` +
+      `<p>It expires in 15 minutes. Give it to your AI agent and ask it to confirm your Secret Santa request. In opencode: <code>/santa-confirm ${code}</code></p>` +
       `<p>If you did not ask to join, ignore this email.</p>`;
     let res: Response;
     try {

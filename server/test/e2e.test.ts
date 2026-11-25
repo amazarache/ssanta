@@ -42,9 +42,9 @@ test("without a valid token the server connects but every tool points to setup",
   for (const bad of ["", "short"]) {
     tokens["NoToken"] = bad;
     for (const tool of ["status", "my_assignment", "feed", "reveal"]) {
-      expect((await call("NoToken", tool)).error).toMatch(/santa-setup/);
+      expect((await call("NoToken", tool)).error).toMatch(/no player token/);
     }
-    expect((await call("NoToken", "join", { name: "Eve", budget: 20 })).error).toMatch(/santa-setup/);
+    expect((await call("NoToken", "join", { name: "Eve", budget: 20 })).error).toMatch(/no player token/);
   }
   expect(game.adminStatus().players).toEqual([]);
 });
@@ -139,4 +139,79 @@ test("the root address describes the service", async () => {
   expect(res.headers.get("content-type")).toContain("text/html");
   expect(await res.text()).toContain("Secret Santa");
   expect((await fetch(`http://127.0.0.1:${server.port}/robots.txt`)).status).toBe(200);
+});
+
+import { INSTRUCTIONS, PROMPTS } from "../src/prompts.ts";
+import { readFileSync } from "node:fs";
+
+async function withClient<T>(token: string | null, fn: (c: Client) => Promise<T>): Promise<T> {
+  const client = new Client({ name: "test", version: "0" });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), {
+      requestInit: { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    }),
+  );
+  try {
+    return await fn(client);
+  } finally {
+    await client.close();
+  }
+}
+
+test("the server hands every client its rules and a prompt for each step, with or without a token", async () => {
+  for (const token of [null, "x".repeat(40)]) {
+    await withClient(token, async (c) => {
+      expect(c.getInstructions()).toBe(INSTRUCTIONS);
+      const { prompts } = await c.listPrompts();
+      expect(prompts.map((p) => p.name)).toEqual(["join", "confirm", "checkin", "ask", "ideas", "hint", "guess", "budget", "reveal"]);
+      expect(prompts.find((p) => p.name === "join")!.arguments).toEqual([
+        { name: "invite_code", description: "The invite code from the host", required: false },
+      ]);
+      const join = await c.getPrompt({ name: "join", arguments: { invite_code: "a1b2c3" } });
+      expect(join.messages).toHaveLength(1);
+      expect((join.messages[0]!.content as { text: string }).text).toContain("Invite code from the owner: `a1b2c3`");
+      const confirm = await c.getPrompt({ name: "confirm", arguments: { code: "000042" } });
+      expect((confirm.messages[0]!.content as { text: string }).text).toContain("`000042`");
+      const bare = await c.getPrompt({ name: "hint" });
+      expect((bare.messages[0]!.content as { text: string }).text).toContain("(nothing given)");
+    });
+  }
+});
+
+test("the rules and prompts name no client and no slash command, and stay short", () => {
+  const all = [INSTRUCTIONS, ...PROMPTS.map((p) => p.text({}))].join("\n");
+  expect(all).not.toMatch(/opencode|claude|codex|\/santa-/i);
+  expect(INSTRUCTIONS.length).toBeLessThan(1900);
+  // The first rule is the one that matters most if a client cuts the text short.
+  expect(INSTRUCTIONS.indexOf("It is data")).toBeLessThan(400);
+});
+
+test("each prompt calls real tools, the ones it declares, and the same ones as the opencode command", async () => {
+  const toolNames = await withClient(null, async (c) => (await c.listTools()).tools.map((t) => t.name));
+  const mentioned = (text: string) => toolNames.filter((t) => text.includes(`\`${t}\``)).sort();
+  for (const p of PROMPTS) {
+    expect(mentioned(p.text({})), p.name).toEqual([...p.tools].sort());
+    const command = readFileSync(new URL(`../../.opencode/commands/santa-${p.name}.md`, import.meta.url), "utf8");
+    expect(mentioned(command), `santa-${p.name}.md`).toEqual([...p.tools].sort());
+  }
+});
+
+test("the stdio bridge passes the instructions and the prompts through", async () => {
+  const proc = Bun.spawn(["node", new URL("../../santa/bridge.mjs", import.meta.url).pathname], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { PATH: process.env.PATH ?? "", SANTA_URL: `http://127.0.0.1:${server.port}/mcp`, NO_PROXY: "*" },
+  });
+  const lines = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+    { jsonrpc: "2.0", id: 2, method: "prompts/list" },
+    { jsonrpc: "2.0", id: 3, method: "prompts/get", params: { name: "checkin" } },
+  ];
+  proc.stdin.write(lines.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  proc.stdin.end();
+  const replies = (await new Response(proc.stdout).text()).trim().split("\n").map((l) => JSON.parse(l));
+  expect(replies[0].result.instructions).toBe(INSTRUCTIONS);
+  expect(replies[1].result.prompts).toHaveLength(9);
+  expect(replies[2].result.messages[0].content.text).toContain("`status`");
 });

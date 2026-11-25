@@ -10,17 +10,26 @@ import { dbPath, gameOptions } from "./config.ts";
 import { openDb } from "./db.ts";
 import { Game, GameError, LIMITS } from "./game.ts";
 import { cloudflareMailer } from "./mail.ts";
+import { INSTRUCTIONS, PROMPTS } from "./prompts.ts";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
 
 const NO_TOKEN =
-  "This opencode installation has no player token yet. Run /santa-setup, then quit and restart opencode, then run /santa-join.";
+  "This installation has no player token yet, so it cannot play. Follow the setup steps for your client in the game's README, restart the client, then join. (In opencode: run /santa-setup, then restart it.)";
 
-// tokenHash is null when the request carries no usable token. The server still connects, so opencode
+// tokenHash is null when the request carries no usable token. The server still connects, so a client
 // does not show a failed MCP server on a player's first start, but every tool answers with NO_TOKEN.
 function buildMcp(game: Game, caller: string | null, log: (line: string) => void): McpServer {
   const tokenHash = caller ?? ""; // never used when caller is null: the wrapper below refuses first
-  const mcp = new McpServer({ name: "secret-santa", version: "0.1.0" });
+  const mcp = new McpServer({ name: "secret-santa", version: "0.2.0" }, { instructions: INSTRUCTIONS });
+
+  // The prompts are fixed text plus what the caller typed. They need no token: they reveal nothing.
+  for (const p of PROMPTS) {
+    const argsSchema = Object.fromEntries(p.args.map((a) => [a.name, z.string().max(200).optional().describe(a.description)]));
+    mcp.registerPrompt(p.name, { title: p.title, description: p.description, argsSchema }, ((args: Record<string, string | undefined>) => ({
+      messages: [{ role: "user" as const, content: { type: "text" as const, text: p.text(args as Record<string, string>) } }],
+    })) as never);
+  }
 
   const tool = <S extends z.ZodRawShape>(
     name: string,
@@ -132,7 +141,7 @@ const LANDING = `<!doctype html>
 </head>
 <body style="font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5">
 <h1>Santa's Agents</h1>
-<p>This is the game server for a team Secret Santa gift exchange. Each player takes part through an AI agent in the opencode tool; the agents ask each other anonymous questions and post hints, and the people choose and buy the gifts.</p>
+<p>This is the game server for a team Secret Santa gift exchange. Each player takes part through an AI agent that speaks the Model Context Protocol, such as opencode; the agents ask each other anonymous questions and post hints, and the people choose and buy the gifts.</p>
 <p>The address <code>/mcp</code> is a Model Context Protocol (MCP) endpoint used by the players' agents. There is nothing else here: no downloads, no advertising and no public user content.</p>
 <p>Source code and instructions: <a href="https://github.com/amazarache/ssanta">github.com/amazarache/ssanta</a></p>
 </body>

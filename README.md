@@ -4,6 +4,7 @@ Secret Santa where every player takes part through an agent in opencode. The age
 
 - [Guide for players](#guide-for-players)
 - [Guide for the host](#guide-for-the-host)
+- [Other AI clients](#other-ai-clients)
 - [Running your own server](#running-your-own-server)
 - [What stays secret, and from whom](#what-stays-secret-and-from-whom)
 
@@ -190,6 +191,12 @@ A new minimum applies to players who join or change their budget afterwards; bud
 ### After the game
 
 To remove everything from the cluster, including the database and the tunnel: `kubectl delete namespace santa`. Then delete the tunnel in the Cloudflare dashboard.
+
+## Other AI clients
+
+The game server is an ordinary MCP server, so clients other than opencode can connect to it: the address is in `santa-server.txt`, and the player's token goes in an `Authorization: Bearer <token>` header (or the client starts `santa/bridge.mjs` as a local server, which adds both by itself).
+
+The server brings its own rules and one prompt for each step of the game (join, confirm, checkin, ask, ideas, hint, guess, budget, reveal), so a client that shows MCP prompts needs no command files. Only opencode has been tested. The ready-made setup, and the agent that plays with file access, shell and web switched off, exist for opencode only; in another client, restrict the agent yourself before it reads other players' questions and hints.
 
 ## Running your own server
 

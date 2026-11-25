@@ -414,7 +414,7 @@ export class Game {
     const total = this.count("SELECT COUNT(*) AS c FROM players");
     if (total >= this.maxPlayers) throw new GameError("The game is full.");
     if (this.db.query("SELECT 1 FROM players WHERE name_key = ?").get(name.toLowerCase())) {
-      throw new GameError(`The name ${name} is taken. Change it in vibe.md and run /santa-join again.`, "name_taken");
+      throw new GameError(`The name ${name} is taken. Choose another name and join again.`, "name_taken");
     }
     this.db
       .query("INSERT INTO players (name, name_key, token_hash, budget, email_fp) VALUES (?, ?, ?, ?, ?)")
@@ -531,7 +531,7 @@ export class Game {
     const reply = {
       confirmation_sent: true,
       request_ref: plan.ref,
-      note: `If the address can join, a six-digit code is on its way. Run /santa-confirm <code> within 15 minutes. ${byHand}`,
+      note: `If the address can join, a six-digit code is on its way. Confirm with that code within 15 minutes. ${byHand}`,
     };
     if (plan.limit) throw new GameError(`${plan.limit.message} Your request is saved. ${byHand}`, plan.limit.reason);
     if (plan.code === null) return reply;
@@ -554,7 +554,7 @@ export class Game {
           ? "The mail service refused this address (the host's mail plan only allows verified addresses)."
           : m.status === 429
             ? "The mail service limit is reached."
-            : "The confirmation email could not be sent. Check the address in vibe.md.";
+            : "The confirmation email could not be sent. Check the address.";
       throw new GameError(`${why} Your request is saved. Give the host your email address and this reference: ${plan.ref}`, "mail_failed");
     }
     return reply;
@@ -598,7 +598,7 @@ export class Game {
   confirm(tokenHash: string, code: string) {
     const c = String(code ?? "").trim();
     if (!/^\d{6}$/.test(c)) throw new GameError("The code is six digits.");
-    const restart = "Run /santa-join again to get a new code.";
+    const restart = "Join again to get a new code.";
     const outcome = this.tx(() => {
       const reg = this.db.query("SELECT code_hash, expires_at, attempts FROM registrations WHERE token_hash = ?").get(tokenHash) as
         | Pick<Registration, "code_hash" | "expires_at" | "attempts">
@@ -856,11 +856,11 @@ export class Game {
       const rows = this.db.query("SELECT token_hash FROM registrations WHERE email = ? AND ref = ?").all(e, r) as { token_hash: string }[];
       if (rows.length === 0) {
         throw new GameError(
-          "No pending request matches that address and reference. Ask the player to run /santa-join again and to read you the address and the reference it shows.",
+          "No pending request matches that address and reference. Ask the player to join again and to read you the address and the reference their agent shows.",
         );
       }
       if (rows.length > 1) {
-        throw new GameError("Two requests share that address and reference. Run 'reject' for the address and ask the player to run /santa-join again.");
+        throw new GameError("Two requests share that address and reference. Run 'reject' for the address and ask the player to join again.");
       }
       const existing = this.playerByEmail(e);
       if (existing && !opts.rebind) {
