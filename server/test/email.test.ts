@@ -109,7 +109,8 @@ describe("joining by email", () => {
     const mails = sent.length;
     expect(await game.requestJoin("t9", "Late", 20, "late@example.org")).toEqual(reply);
     expect(sent).toHaveLength(mails);
-    expect(() => game.adminConfirm("late@example.org")).toThrow(/closed/);
+    expect(() => game.adminConfirm("late@example.org")).toThrow(/No pending/);
+    expect(game.adminPending()).toEqual([]);
   });
 
   test("a taken name is refused at confirmation and nothing is half-created", async () => {
@@ -134,7 +135,7 @@ describe("joining by email", () => {
         },
       });
       await expect(game.requestJoin("t1", "Ana", 20, "ana@example.org")).rejects.toThrow(msg);
-      expect(game.adminPending()).toEqual(["ana@example.org"]);
+      expect(game.adminPending().map((r) => r.email)).toEqual(["ana@example.org"]);
       expect(game.adminConfirm("ana@example.org")).toBe("Ana");
       expect(logs.join()).not.toMatch(/ana|example/i);
       expect(logs[0]).toMatch(/^mail failed \d+\/(\d+|-)$/);
@@ -144,10 +145,47 @@ describe("joining by email", () => {
   test("the host can list pending addresses and confirm one by hand", async () => {
     const { game } = setup();
     await game.requestJoin("t1", "Ana", 20, "ana@example.org");
-    expect(game.adminPending()).toEqual(["ana@example.org"]);
+    expect(game.adminPending()).toEqual([{ email: "ana@example.org", requested_name: "Ana", minutes_ago: 0, note: "" }]);
     expect(game.adminConfirm("ANA@example.org")).toBe("Ana");
     expect(game.adminPending()).toEqual([]);
     expect(() => game.adminConfirm("nobody@example.org")).toThrow(/No pending/);
+  });
+
+  test("hand-confirming cannot quietly give a player to another installation", async () => {
+    const { game, signUp, wait } = setup({ minPlayers: 3 });
+    await signUp("a", "Ana", "ana@example.org");
+    await signUp("b", "Bo", "bo@example.org");
+    await signUp("c", "Cy", "cy@example.org");
+    game.draw();
+    const anaGives = game.myAssignment("a");
+
+    // Someone with the invite code files a request under Ana's address. They never see the code.
+    wait(61_000);
+    await game.requestJoin("intruder", "Whoever", 20, "ana@example.org");
+    expect(game.adminPending()[0]!.note).toMatch(/already plays as Ana/);
+    expect(() => game.adminConfirm("ana@example.org")).toThrow(/already plays as Ana.*--rebind/s);
+    expect(() => game.myAssignment("intruder")).toThrow(/not joined/);
+    expect(game.myAssignment("a")).toEqual(anaGives);
+
+    // Two installations asking for one address: refused until the host clears them.
+    wait(61_000);
+    await game.requestJoin("a-new", "Ana", 20, "ana@example.org");
+    expect(() => game.adminConfirm("ana@example.org", { rebind: true })).toThrow(/2 different installations/);
+    expect(game.adminReject("ana@example.org")).toBe(2);
+
+    // The real recovery: one request, checked with the player, confirmed with the flag.
+    wait(61_000);
+    await game.requestJoin("a-new", "Ana", 20, "ana@example.org");
+    expect(game.adminConfirm("ana@example.org", { rebind: true })).toBe("Ana");
+    expect(game.myAssignment("a-new")).toEqual(anaGives);
+  });
+
+  test("old pending requests are cleaned up", async () => {
+    const { game, wait } = setup();
+    await game.requestJoin("t1", "Ana", 20, "ana@example.org");
+    wait(8 * 24 * 3600_000);
+    await game.requestJoin("t2", "Bo", 20, "bo@example.org");
+    expect(game.adminPending().map((r) => r.email)).toEqual(["bo@example.org"]);
   });
 
   test("no player-facing output contains an email address", async () => {

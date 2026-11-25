@@ -45,6 +45,8 @@ export interface GameOptions {
 const CODE_TTL_MS = 15 * 60 * 1000;
 const CODE_ATTEMPTS = 5;
 const MAIL_COOLDOWN_MS = 60 * 1000;
+// A request stays visible to the host this long, so it can be confirmed by hand when mail does not arrive.
+const PENDING_KEEP_MS = 7 * 24 * 3600 * 1000;
 const MAIL_PER_ADDRESS_PER_DAY = 5;
 const EMAIL_RE = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[^\s@<>"',;]+$/;
 const CODE_SENT_REPLY = {
@@ -265,6 +267,11 @@ export class Game {
       throw new GameError("The server reached its email limit for today. Try again tomorrow or ask the host to confirm you.", "mail_daily_cap");
     }
 
+    // New players can only join in the lobby. An address that already plays may confirm at any time, to recover a lost token.
+    const known = count("SELECT COUNT(*) AS c FROM players WHERE email = ?", e) > 0;
+    if (this.phase() !== "lobby" && !known) return CODE_SENT_REPLY;
+
+    this.db.query("DELETE FROM registrations WHERE expires_at < ?").run(now - PENDING_KEEP_MS);
     const code = String(this.rand(1_000_000)).padStart(6, "0");
     this.db
       .query(
@@ -273,10 +280,6 @@ export class Game {
            code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0`,
       )
       .run(tokenHash, e, n, b, this.codeHash(tokenHash, code), now + CODE_TTL_MS);
-
-    // New players can only join in the lobby. An address that already plays may confirm at any time, to recover a lost token.
-    const known = count("SELECT COUNT(*) AS c FROM players WHERE email = ?", e) > 0;
-    if (this.phase() !== "lobby" && !known) return CODE_SENT_REPLY;
 
     this.db.query("INSERT INTO mail_log (email, sent_at) VALUES (?, ?)").run(e, now);
     try {
@@ -529,18 +532,55 @@ export class Game {
     })();
   }
 
-  /** Host fallback when mail does not arrive: confirms the newest pending registration for an address. */
-  adminConfirm(email: string): string {
-    const row = this.db
-      .query("SELECT token_hash FROM registrations WHERE email = ? ORDER BY expires_at DESC LIMIT 1")
-      .get(email.trim().toLowerCase()) as { token_hash: string } | null;
-    if (!row) throw new GameError("No pending registration for that address. The player must run /santa-join first.");
-    return this.promote(row.token_hash).joined_as;
+  /**
+   * Host fallback when mail does not arrive. The host has not seen proof that the request came from the
+   * owner of the address, so this refuses the two cases where a wrong confirmation does damage:
+   * several requests for one address, and an address that already plays (which would move that player).
+   */
+  adminConfirm(email: string, opts: { rebind?: boolean } = {}): string {
+    const e = email.trim().toLowerCase();
+    const rows = this.db.query("SELECT token_hash FROM registrations WHERE email = ?").all(e) as { token_hash: string }[];
+    if (rows.length === 0) throw new GameError("No pending registration for that address. The player must run /santa-join first.");
+    if (rows.length > 1) {
+      throw new GameError(
+        `${rows.length} different installations asked to join with that address, and only one can be the owner's. Run 'reject' for the address, then ask the player to run /santa-join once more.`,
+      );
+    }
+    const existing = this.db.query("SELECT name FROM players WHERE email = ?").get(e) as { name: string } | null;
+    if (existing && !opts.rebind) {
+      throw new GameError(
+        `That address already plays as ${existing.name}. Confirming would move ${existing.name} to another installation, which could then read their assignment. Check with ${existing.name} directly that they lost their token, then repeat with --rebind.`,
+      );
+    }
+    return this.promote(rows[0]!.token_hash).joined_as;
   }
 
-  /** Addresses that asked for a code and have not confirmed. Host only. */
-  adminPending(): string[] {
-    return (this.db.query("SELECT DISTINCT email FROM registrations ORDER BY email").all() as { email: string }[]).map((r) => r.email);
+  /** Drops every pending request for an address. */
+  adminReject(email: string): number {
+    return this.db.query("DELETE FROM registrations WHERE email = ?").run(email.trim().toLowerCase()).changes;
+  }
+
+  /** Requests that asked for a code and have not confirmed. Host only. */
+  adminPending() {
+    const now = this.now().getTime();
+    return (
+      this.db
+        .query(
+          `SELECT r.email, r.name, r.expires_at, p.name AS plays_as,
+                  (SELECT COUNT(*) FROM registrations x WHERE x.email = r.email) AS requests
+           FROM registrations r LEFT JOIN players p ON p.email = r.email ORDER BY r.email, r.expires_at`,
+        )
+        .all() as { email: string; name: string; expires_at: number; plays_as: string | null; requests: number }[]
+    ).map((r) => ({
+      email: r.email,
+      requested_name: r.name,
+      minutes_ago: Math.max(0, Math.round((now - (r.expires_at - CODE_TTL_MS)) / 60000)),
+      note: r.plays_as
+        ? `already plays as ${r.plays_as}: confirming moves that player (needs --rebind)`
+        : r.requests > 1
+          ? `${r.requests} requests for this address`
+          : "",
+    }));
   }
 
   /** Lobby only: frees a name after a typo or a lost token. */

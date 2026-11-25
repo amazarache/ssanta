@@ -17,14 +17,22 @@ try {
     game.openReveal();
     console.log("Reveal is open. Players can now call the reveal tool.");
   } else if (cmd === "pending") {
-    console.log(game.adminPending().join("\n") || "Nobody is waiting for a confirmation.");
+    const rows = game.adminPending();
+    if (rows.length === 0) console.log("Nobody is waiting for a confirmation.");
+    for (const r of rows) {
+      console.log(`${r.email}  wants the name "${r.requested_name}"  asked ${r.minutes_ago} min ago${r.note ? `  [${r.note}]` : ""}`);
+    }
+    if (rows.length) console.log("\nBefore you confirm, check with the player directly that they just ran /santa-join.");
   } else if (cmd === "confirm" && process.argv[3]) {
-    console.log(`Confirmed. They play as ${game.adminConfirm(process.argv[3])}.`);
+    const name = game.adminConfirm(process.argv[3], { rebind: process.argv.includes("--rebind") });
+    console.log(`Confirmed. They play as ${name}.`);
+  } else if (cmd === "reject" && process.argv[3]) {
+    console.log(`Dropped ${game.adminReject(process.argv[3])} pending request(s).`);
   } else if (cmd === "remove" && process.argv[3]) {
     game.removePlayer(process.argv[3]);
     console.log(`Removed ${process.argv[3]}. They can join again.`);
   } else {
-    console.log("Usage: bun run admin <status|draw|reveal|remove NAME|pending|confirm EMAIL>");
+    console.log("Usage: bun run admin <status|draw|reveal|remove NAME|pending|confirm EMAIL [--rebind]|reject EMAIL>");
     process.exit(cmd ? 1 : 0);
   }
 } catch (err) {

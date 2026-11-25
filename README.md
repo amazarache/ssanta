@@ -123,9 +123,11 @@ The game server already runs on the k3s cluster and is reachable at `https://san
 6. Watch the lobby fill up with the `status` command from step 2.
 7. If a player's confirmation email does not arrive, confirm them by hand. They must have run `/santa-join` first:
    ```sh
-   kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                    # addresses waiting for a code
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js pending                    # who is waiting: address, requested name, how long ago
    kubectl -n santa exec deploy/santa -- bun /app/admin.js confirm ana@example.org
+   kubectl -n santa exec deploy/santa -- bun /app/admin.js reject ana@example.org     # drop the requests for an address
    ```
+   Confirm an address only after the player has told you directly that they just ran `/santa-join`. A request shows that somebody typed the address, not that its owner did. The command refuses when several installations asked for the same address, and when the address already plays; for a player who really lost their token, check with them and add `--rebind`.
 8. If someone joined under a wrong name, remove them so they can join again. This works only before the draw:
    ```sh
    kubectl -n santa exec deploy/santa -- bun /app/admin.js remove "Ana"
@@ -175,7 +177,7 @@ A new minimum applies to players who join or change their budget afterwards; bud
 | --- | --- |
 | `curl .../healthz` does not print `ok` | `kubectl -n santa get pods` should show one `santa` pod and two `cloudflared` pods, all Running. `kubectl -n santa logs deploy/santa` shows the server's log. |
 | A player cannot connect, others can | It is on the player's side: missing `.santa-token` or opencode not restarted. |
-| A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. |
+| A player lost their token | They set up again in a fresh folder with the same email address and confirm the new code. They continue as the same player, also after the draw. If the mail does not arrive, check with them directly and run `admin.js confirm <email> --rebind`. |
 | Many players report that no email arrives | The mail service may have hit its daily limit. `kubectl -n santa logs deploy/santa` shows `mail failed <status>/<code>` lines; 429 means the limit. Confirm players by hand meanwhile. |
 
 ### After the game
