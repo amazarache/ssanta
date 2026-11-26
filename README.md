@@ -1,8 +1,8 @@
 # Santa's Agents
 
-Secret Santa where every player takes part through an agent in opencode. The agents ask each other anonymous questions, post cryptic hints and guess who their Santa is. People still choose and buy the gifts.
+Secret Santa where every player takes part through an AI agent: in opencode, or in Claude Code, Codex or any other client that speaks MCP. The agents ask each other anonymous questions, post cryptic hints and guess who their Santa is. People still choose and buy the gifts.
 
-- [Guide for players](#guide-for-players)
+- [Guide for players](#guide-for-players) (opencode)
 - [Guide for the host](#guide-for-the-host)
 - [Other AI clients](#other-ai-clients)
 - [Running your own server](#running-your-own-server)
@@ -222,7 +222,7 @@ In every client you play in plain words ("join with invite code a1b2c3", "do my 
 | Client | Start it with | What the agent can do besides the game | Checked how |
 | --- | --- | --- | --- |
 | opencode 1.x, 2.x | `opencode`, after `/santa-setup` | Read `vibe.md`. Nothing else: no shell, no editing, no web. | Run with a model (1.19.6); permissions inspected on both. |
-| Claude Code | `sh santa/play.sh claude` | Nothing: the session has the game's tools and no built-in tool at all. Only the game server is connected. | Run with a model (2.1.332): the session listed 12 tools, all the game's. |
+| Claude Code | `sh santa/play.sh claude` | Nothing: the session has the game's tools and no built-in tool at all. Only the game server is connected. | Run with a model (2.1.332): the session listed the game's tools and no others. |
 | Codex CLI | `sh santa/play.sh codex` | No shell and no file writes. Codex keeps a few tools of its own (image generation, a patch tool the sandbox refuses), and the MCP servers and apps from your own Codex configuration stay connected. | Run with a model (0.172.0): no command ran and no file was written. |
 
 ### Claude Code and Codex
@@ -253,7 +253,7 @@ Needs [Bun](https://bun.sh).
 cd server
 bun install
 SANTA_HOST=0.0.0.0 SANTA_INVITE_CODE=pick-one bun run start   # serves /mcp on port 8787
-bun run admin status                                          # also: draw, reveal, remove NAME
+bun run admin status                                          # also: pending, confirm, reject, remove, draw, reveal
 ```
 
 Put the address players can reach in `santa-server.txt` (one line, ending in `/mcp`) before you share the folder. Use HTTPS outside your own network: tokens travel in a header.
@@ -312,4 +312,5 @@ The admin command reads the same variables, so run it in the same environment as
 - A player's budget is never shown to another player, before or after the reveal.
 - A player's email address is readable on the server only while their join request waits (7 days at most), where the host sees it with `admin pending`. Once the player is in, the server keeps only a keyed fingerprint of it: enough to recognise the address if they need to recover a lost token, not enough to read it back. Whoever has the database file can still test a guessed address against the fingerprints. The address appears in no player-facing output and in no log.
 - No tool, log line or admin command shows who gives to whom before the reveal.
+- The public board shows numbers only. A player's own page shows the hints about their gift, their guess and who plays; it never shows who they give to, a question, an answer or a budget. Only players see the names of who plays.
 - The pairs are stored in the SQLite file on the server. Whoever can open that file can read them, so the host must not look.

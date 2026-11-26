@@ -18,7 +18,7 @@ bun run start                     # MCP server on 127.0.0.1:8787/mcp
 bun run admin status|pending|confirm EMAIL REF [--rebind]|reject EMAIL|reject --all|reject --late|remove NAME|draw|reveal  # organiser commands; an unknown option does nothing
 ```
 
-Deploy (from the repository root; the live game runs in namespace `santa` on the k3s cluster, at `http://santa.k3s.home/mcp`):
+Deploy (from the repository root; the live game runs in namespace `santa` on the k3s cluster; players reach it at `https://santa.mazarache.org/mcp` through a Cloudflare Tunnel, `deploy/cloudflared.yaml`, and `santa.k3s.home` is the plain-HTTP ingress on the LAN):
 
 ```sh
 deploy/build.sh && kubectl apply --server-side -k deploy/
@@ -31,7 +31,7 @@ To try the player side against a local server: start the server, put its address
 
 ## Architecture
 
-The team's only shared tool is opencode, so the game has two halves and no chat platform.
+The team's shared tool is opencode, so the game has two halves and no chat platform. The server half works with any MCP client; the client pack is built for opencode, with launchers for Claude Code and Codex.
 
 - **Server (`server/src`).** Holds all state and enforces the rules. It has no model. `game.ts` is the rules as a plain class over SQLite, with no HTTP in it. `server.ts` exposes thirteen player tools over MCP Streamable HTTP, stateless: each request builds an `McpServer` bound to the SHA-256 hash of the caller's bearer token, so a tool can only act as the caller. `db.ts` opens the database and `config.ts` reads the settings for both entry points, so the admin command enforces the same limits as the server (both are separate files so that bundling `admin.ts` does not start a server). `mail.ts` sends the confirmation code through the Cloudflare Email Service REST API. `board.ts` renders the public page at `/board`, and `me.ts` a player's own page at `/me`. `prompts.ts` holds what the server tells any MCP client about playing: its `instructions` and one prompt per step of the game. `admin.ts` is the organiser's CLI; the draw and the reveal are deliberately not tools.
 - **The server is client-neutral; the client pack is not.** Anything the server says to a player (tool descriptions, replies, errors, `prompts.ts`, the mail) must work in any MCP client: describe the action ("join again", "confirm with the code"), never a slash command or a client's layout, and at most add the opencode form as an aside. The instructions may be loaded into sessions that have nothing to do with the game, so they are scoped to "whenever you use these tools" and kept under about 1,900 characters, most important rule first. A prompt is fixed text plus what the caller typed, never another player's text. The opencode commands in `.opencode/commands` and the prompts say the same thing; a test checks that each pair calls the same tools, so change both together.
@@ -54,7 +54,7 @@ A Secret Santa game for a team that uses AI every day. Each person takes part th
 
 Proposed defaults, not yet confirmed by the project owner.
 
-- Joining takes under two minutes and happens inside opencode. No sign-up forms, no long instructions.
+- Joining is short and happens inside the player's AI client. No sign-up forms, no long instructions.
 - Short messages. One idea per message.
 - Humour is dry and self-aware. The agents can be funny about being agents.
 - Do not force slang or pile on emoji. Text that tries to sound young reads as written by someone who is not.
@@ -86,6 +86,8 @@ Ideas that were considered and left out of the first version: a gift tag written
 
 ## Open decisions
 
-- How players outside the home network reach the server: `santa.k3s.home` resolves only on the LAN and is plain HTTP.
+- The dates of the game (join by, draw, reveal): not set, so the board says they are not announced.
+- Mail: the Cloudflare account's plan sends only to verified addresses (the send fails with 403/10208), so until the plan changes every player is confirmed by hand with address and reference.
+- Whether a player's own page should also show who they give to. It does not, on purpose.
 - Whether remote players need shipped or digital gifts.
 - Whether to encrypt assignments at rest so the organiser cannot read them.
